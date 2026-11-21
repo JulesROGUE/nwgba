@@ -56,6 +56,7 @@ uint32_t cpu_getCpsr(const Cpu* c) {
 
 void cpu_setCpsr(Gba* g, uint32_t v) {
   Cpu* c = &g->cpu;
+  g->busy = 1;
   switchMode(c, v);
   c->fn = v;
   c->fz = !(v & 0x40000000u);
@@ -85,6 +86,7 @@ void cpu_reset(Gba* g) {
 /* the interrupt exception, between two instructions */
 void cpu_irq(Gba* g) {
   Cpu* c = &g->cpu;
+  g->busy = 1;
   const uint32_t old = cpu_getCpsr(c);
   const uint32_t lr = (old & T_BIT) ? c->r[15] : c->r[15] - 4;   /* next instruction + 4 */
   switchMode(c, 0x12);
@@ -229,6 +231,50 @@ static inline uint32_t load16(Gba* g, uint32_t a) {
 static inline uint32_t load16s(Gba* g, uint32_t a) {
   if(a & 1) return (uint32_t)(int8_t)mem_r8(g, a);
   return (uint32_t)(int16_t)mem_r16(g, a);
+}
+
+/* ------------------------------------------------------- waiting loops -- */
+
+#define SNAP_BYTES (21 * sizeof(uint32_t))   /* r0-r15, the flags, cpsr */
+
+/* at a backward jump reached again with nothing written since */
+static void idleSlow(Gba* g) {
+  Cpu* c = &g->cpu;
+  const uint32_t slot = (g->idleAddr >> 1) & 15;
+  if(g->idleReject[slot] == g->idleAddr) return;
+  if(g->idleArmed) {
+    if(!memcmp(c, g->idleSnap, SNAP_BYTES)) {
+      /* the same state at the same place: nothing will change before the next event */
+      if((int32_t)(g->target - g->cycles) > 0) {
+        g->idleCycles += g->target - g->cycles;
+        g->cycles = g->target;
+      }
+      g->idleFails = 0;
+      return;
+    }
+    if(++g->idleFails >= 8) {   /* a loop that computes without writing: leave it alone */
+      g->idleReject[slot] = g->idleAddr;
+      g->idleFails = 0;
+      g->idleArmed = 0;
+      return;
+    }
+  }
+  memcpy(g->idleSnap, c, SNAP_BYTES);
+  g->idleArmed = 1;
+}
+
+/* called at every backward jump taken (r15 tells which) */
+static inline void idleHook(Gba* g) {
+  const uint32_t at = g->cpu.r[15];
+  if(at == g->idleAddr && !g->dirty && !g->busy) {
+    idleSlow(g);
+  } else {
+    g->idleAddr = at;
+    g->idleArmed = 0;
+    g->idleFails = 0;
+    g->dirty = 0;
+    g->busy = 0;
+  }
 }
 
 /* ---------------------------------------------------------------- ARM -- */
@@ -497,9 +543,10 @@ static void armExec(Gba* g, uint32_t op) {
       armBlock(g, op);
       return;
     case 5: {
-      const uint32_t t = r[15] + (uint32_t)((int32_t)(op << 8) >> 6);
+      const int32_t off = (int32_t)(op << 8) >> 6;
       if(op & 0x01000000) r[14] = r[15] - 4;
-      armJump(g, t);
+      else if(off < 0) idleHook(g);
+      armJump(g, r[15] + (uint32_t)off);
       return;
     }
     case 7:
@@ -742,11 +789,15 @@ static inline void thumbExec(Gba* g, uint32_t op) {
       if(cc == 15) {
         if(bios_swi(g, op & 0xff)) r[15] -= 2;
       } else if(cond(c, cc)) {
+        if(op & 0x80) idleHook(g);
         thumbJump(g, r[15] + (uint32_t)((int32_t)(int8_t)op * 2));
       }
       break;
     }
-    case 28: thumbJump(g, r[15] + (uint32_t)((int32_t)(op << 21) >> 20)); break;
+    case 28:
+      if(op & 0x400) idleHook(g);
+      thumbJump(g, r[15] + (uint32_t)((int32_t)(op << 21) >> 20));
+      break;
     case 30: r[14] = r[15] + (uint32_t)((int32_t)(op << 21) >> 9); break;
     case 31: {
       const uint32_t next = (r[15] - 2) | 1;

@@ -184,6 +184,7 @@ static uint32_t ioRead(Gba* g, uint32_t a) {   /* a: even offset */
   switch(a) {
     case 0x100: case 0x104: case 0x108: case 0x10c:
       timers_sync(g);
+      g->busy = 1;   /* the clock was looked at: a loop doing that is not idle */
       return g->timer[(a - 0x100) >> 2].counter & 0xffff;
     case REG_KEYINPUT: return ~(uint32_t)g->keys & 0x3ff;
     default: return g->io[a >> 1];
@@ -387,77 +388,106 @@ uint32_t mem_r32(Gba* g, uint32_t a) {
 
 /* -------------------------------------------------------------- writes -- */
 
+/* stores that note what they change (see Gba.dirty) */
+static inline uint32_t sigOf(uint32_t a) { return (a * 0x9e3779b1u) | 1; }
+static inline void put8(Gba* g, uint32_t a, uint8_t* p, uint32_t v) {
+  g->dirty ^= (*p ^ (v & 0xff)) * sigOf(a);
+  *p = (uint8_t)v;
+}
+static inline void put16(Gba* g, uint32_t a, uint8_t* p, uint32_t v) {
+  g->dirty ^= (ld16(p) ^ (v & 0xffff)) * sigOf(a);
+  st16(p, v);
+}
+static inline void put32(Gba* g, uint32_t a, uint8_t* p, uint32_t v) {
+  g->dirty ^= (ld32(p) ^ v) * sigOf(a);
+  st32(p, v);
+}
+
 void mem_w8(Gba* g, uint32_t a, uint32_t v) {
   switch(a >> 24) {
-    case 2: g->cycles += 3; g->ewW[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)][a & PG_MASK] = (uint8_t)v; return;
-    case 3: g->cycles++; g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)][a & PG_MASK] = (uint8_t)v; return;
-    case 4: g->cycles++; ioWrite8(g, a & 0x00ffffffu, v); return;
-    case 5:
+    case 2: g->cycles += 3; put8(g, a, &g->ewW[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)][a & PG_MASK], v); return;
+    case 3: g->cycles++; put8(g, a, &g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)][a & PG_MASK], v); return;
+    case 4: g->cycles++; g->busy = 1; ioWrite8(g, a & 0x00ffffffu, v); return;
+    case 5: {
+      uint8_t* p = g->pal + (a & 0x3fe);
       g->cycles++;
-      st16(g->pal + (a & 0x3fe), (v & 0xff) * 0x101);
-      g->palDirty = true;
+      if(ld16(p) != (v & 0xff) * 0x101) {
+        put16(g, a, p, (v & 0xff) * 0x101);
+        g->palDirty = true;
+      }
       return;
+    }
     case 6: {   /* a byte written to the backgrounds' part goes to both bytes of the word; to the sprites', nowhere */
       const uint32_t o = vramOff(a);
       g->cycles++;
       if(o >= (((g->io[REG_DISPCNT >> 1] & 7) >= 3) ? 0x14000u : 0x10000u)) return;
-      st16(g->vrW[o >> PG_SHIFT] + (o & PG_MASK & ~1u), (v & 0xff) * 0x101);
+      put16(g, a, g->vrW[o >> PG_SHIFT] + (o & PG_MASK & ~1u), (v & 0xff) * 0x101);
       return;
     }
-    case 14: case 15: g->cycles += 5; saveWrite(g, a, v); return;
+    case 14: case 15: g->cycles += 5; g->busy = 1; saveWrite(g, a, v); return;
     default: g->cycles++; return;
   }
 }
 
 void mem_w16(Gba* g, uint32_t a, uint32_t v) {
   switch(a >> 24) {
-    case 2: g->cycles += 3; st16(g->ewW[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
-    case 3: g->cycles++; st16(g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
-    case 4: g->cycles++; ioWrite(g, a & 0x00fffffeu, v); return;
-    case 5:
+    case 2: g->cycles += 3; put16(g, a, g->ewW[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
+    case 3: g->cycles++; put16(g, a, g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
+    case 4: g->cycles++; g->busy = 1; ioWrite(g, a & 0x00fffffeu, v); return;
+    case 5: {
+      uint8_t* p = g->pal + (a & 0x3fe);
       g->cycles++;
-      st16(g->pal + (a & 0x3fe), v);
-      g->palDirty = true;
+      if(ld16(p) != (v & 0xffff)) {
+        put16(g, a, p, v);
+        g->palDirty = true;
+      }
       return;
+    }
     case 6: {
       const uint32_t o = vramOff(a);
       g->cycles++;
-      st16(g->vrW[o >> PG_SHIFT] + (o & PG_MASK), v);
+      put16(g, a, g->vrW[o >> PG_SHIFT] + (o & PG_MASK), v);
       return;
     }
-    case 7: g->cycles++; st16(g->oam + (a & 0x3fe), v); return;
-    case 14: case 15: g->cycles += 5; saveWrite(g, a, v); return;
+    case 7: g->cycles++; put16(g, a, g->oam + (a & 0x3fe), v); return;
+    case 14: case 15: g->cycles += 5; g->busy = 1; saveWrite(g, a, v); return;
     default: g->cycles++; return;
   }
 }
 
 void mem_w32(Gba* g, uint32_t a, uint32_t v) {
   switch(a >> 24) {
-    case 2: g->cycles += 6; st32(g->ewW[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
-    case 3: g->cycles++; st32(g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
+    case 2: g->cycles += 6; put32(g, a, g->ewW[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
+    case 3: g->cycles++; put32(g, a, g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK), v); return;
     case 4:
       g->cycles++;
+      g->busy = 1;
       ioWrite(g, a & 0x00fffffcu, v);
       ioWrite(g, (a & 0x00fffffcu) + 2, v >> 16);
       return;
-    case 5:
+    case 5: {
+      uint8_t* p = g->pal + (a & 0x3fc);
       g->cycles += 2;
-      st32(g->pal + (a & 0x3fc), v);
-      g->palDirty = true;
+      if(ld32(p) != v) {
+        put32(g, a, p, v);
+        g->palDirty = true;
+      }
       return;
+    }
     case 6: {
       const uint32_t o = vramOff(a);
       g->cycles += 2;
-      st32(g->vrW[o >> PG_SHIFT] + (o & PG_MASK), v);
+      put32(g, a, g->vrW[o >> PG_SHIFT] + (o & PG_MASK), v);
       return;
     }
-    case 7: g->cycles++; st32(g->oam + (a & 0x3fc), v); return;
-    case 14: case 15: g->cycles += 5; saveWrite(g, a, v); return;
+    case 7: g->cycles++; put32(g, a, g->oam + (a & 0x3fc), v); return;
+    case 14: case 15: g->cycles += 5; g->busy = 1; saveWrite(g, a, v); return;
     default: g->cycles++; return;
   }
 }
 
 void mem_poke8(Gba* g, uint32_t a, uint32_t v) {
+  g->busy = 1;
   switch(a >> 24) {
     case 2: g->ewW[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)][a & PG_MASK] = (uint8_t)v; return;
     case 3: g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)][a & PG_MASK] = (uint8_t)v; return;

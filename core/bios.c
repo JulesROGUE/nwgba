@@ -310,6 +310,7 @@ static bool intrWait(Gba* g, bool discard, uint32_t mask) {
 
 bool bios_swi(Gba* g, uint32_t n) {
   uint32_t* r = g->cpu.r;
+  g->busy = 1;
   switch(n) {
     case 0x00:   /* SoftReset */
       cpu_reset(g);

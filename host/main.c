@@ -1,7 +1,7 @@
 /*
  * nwgba-host - runs a game on a PC and writes pictures of the screen.
  *
- *   nwgba-host GAME.gba [--frames N] [--dump DIR] [--every K] [--keys "F:KEYS ..."]
+ *   nwgba-host GAME.gba [--frames N] [--dump DIR] [--every K] [--keys "F:KEYS ..."] [--hash N]
  *
  * --keys: at frame F, hold KEYS for 6 frames (or "F:KEYS*N" for N frames).
  * Keys: A B s (select) S (start) r l u d R L.
@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "usage: nwgba-host GAME.gba [--frames N] [--dump DIR] [--every K] [--keys \"F:KEYS ...\"]\n");
     return 1;
   }
-  int frames = 600, every = 60;
+  int frames = 600, every = 60, hashEvery = 0;
   const char* dump = NULL;
   const char* keys = NULL;
   for(int i = 2; i < argc; i++) {
@@ -50,6 +50,7 @@ int main(int argc, char** argv) {
     else if(!strcmp(argv[i], "--dump") && i + 1 < argc) dump = argv[++i];
     else if(!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
     else if(!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
+    else if(!strcmp(argv[i], "--hash") && i + 1 < argc) hashEvery = atoi(argv[++i]);   /* prints a checksum of the picture every N frames */
   }
   FILE* f = fopen(argv[1], "rb");
   if(!f) {
@@ -77,22 +78,30 @@ int main(int argc, char** argv) {
     else if(!memcmp(rom + i, "SRAM_V", 6)) g.saveType = GBA_SAVE_SRAM;
     else if(!memcmp(rom + i, "EEPROM_V", 8)) g.saveType = GBA_SAVE_EEPROM;
   }
-  uint64_t instrs = 0, busiest = 0;
+  uint64_t instrs = 0, busiest = 0, idle = 0;
   if(getenv("STOPAT")) g.stopAt = (uint32_t)strtoul(getenv("STOPAT"), NULL, 16);
   for(int i = 0; i < frames; i++) {
     g.keys = scriptKeys(keys, (uint32_t)i);
     g.instrs = 0;
     gba_runFrame(&g);
     instrs += g.instrs;
+    idle += g.idleCycles;
+    g.idleCycles = 0;
     if(g.instrs > busiest) busiest = g.instrs;
     if(dump && every && i % every == every - 1) shot(&h, dump, i + 1);
+    if(hashEvery && i % hashEvery == hashEvery - 1) {
+      uint32_t x = 2166136261u;
+      for(int k = 0; k < GBA_W * GBA_H; k++) x = (x ^ h.screen[k]) * 16777619u;
+      printf("%d %08x\n", i + 1, (unsigned)x);
+    }
   }
   if(dump) shot(&h, dump, frames);
   if(getenv("REGS")) {
     for(int i = 0; i < 16; i++) fprintf(stderr, "r%d=%08x%s", i, (unsigned)g.cpu.r[i], i % 4 == 3 ? "\n" : " ");
     fprintf(stderr, "cpsr=%08x\n", (unsigned)cpu_getCpsr(&g.cpu));
   }
-  fprintf(stderr, "%d frames; pc %08x; instructions per frame: %llu on average, %llu at most\n", frames, (unsigned)g.cpu.r[15],
-          (unsigned long long)(instrs / (uint64_t)(frames ? frames : 1)), (unsigned long long)busiest);
+  fprintf(stderr, "%d frames; pc %08x; instructions per frame: %llu on average, %llu at most; %llu%% of the time skipped in waiting loops\n",
+          frames, (unsigned)g.cpu.r[15], (unsigned long long)(instrs / (uint64_t)(frames ? frames : 1)), (unsigned long long)busiest,
+          (unsigned long long)(idle * 100 / (280896ull * (uint64_t)(frames ? frames : 1))));
   return 0;
 }

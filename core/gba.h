@@ -109,6 +109,18 @@ struct Gba {
   bool palDirty;
   bool render;                    /* draw this frame */
   uint32_t frame;
+  /* waiting loops (cpu.c): a backward jump reached twice with the same
+   * registers and nothing written in between changes nothing until the
+   * next event, so the clock is moved there */
+  uint32_t idleAddr;              /* the last backward jump taken */
+  uint32_t idleSnap[21];          /* registers and flags the time before */
+  uint32_t idleReject[16];        /* jumps that turned out to be working loops */
+  uint8_t idleArmed, idleFails;
+  uint32_t dirty;                 /* signature of what memory writes changed since that jump: each
+                                     write adds (old ^ new) x a number made from its address, so
+                                     writes that put things back (push, pop, push again) cancel out */
+  uint8_t busy;                   /* something else happened since: I/O written, clock read, interrupt, BIOS call */
+  uint32_t idleCycles;            /* cycles skipped (statistics) */
   uint32_t instrs;                /* instructions run (statistics) */
   uint32_t stopAt, lastPc[8];     /* debugging (PC builds): trace of jumps into low memory */
   GbaHost host;
