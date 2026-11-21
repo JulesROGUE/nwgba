@@ -34,6 +34,7 @@ typedef struct Pack {
   const uint8_t* blobs;       /* {address, size, first block, kind}: the decompressed blocks */
   uint32_t nBlobs;
   uint32_t saveType;
+  uint32_t key;               /* tells one game from another (its code) */
   uint32_t size1, size2, sum2;
 } Pack;
 

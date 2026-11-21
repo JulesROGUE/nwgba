@@ -5,3 +5,4 @@
 *.pack
 build/
 *.ppm
+node_modules/

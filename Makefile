@@ -3,7 +3,7 @@
 CC ?= gcc
 CFLAGS ?= -O2 -g -Wall -Wextra -std=c11
 BUILD = build
-CORE = core/gba.c core/cpu.c core/mem.c core/ppu.c core/bios.c core/pack.c
+CORE = core/gba.c core/cpu.c core/mem.c core/ppu.c core/bios.c core/pack.c core/save.c
 HEADERS = $(wildcard core/*.h)
 
 .PHONY: all host clean
@@ -19,11 +19,47 @@ $(BUILD):
 clean:
 	rm -rf $(BUILD)
 
+# ---- calculator app -------------------------------------------------------
+#   make nwa       the app (build/nwgba.nwa), needs arm-none-eabi-gcc + node
+#   make nwa-check links it as the installer does, shows the RAM it keeps
+NWLINK ?= npx --yes -- nwlink@1.0.0
+ARM_CC ?= arm-none-eabi-gcc
+ARM_CFLAGS = -std=c11 -O2 -Wall -Wextra -DNWGBA_CALC
+ARM_CFLAGS += $(shell $(NWLINK) eadk-cflags-device)
+ARM_CFLAGS += -fdata-sections -ffunction-sections
+ARM_CFLAGS += -flto -fno-fat-lto-objects -fwhole-program -fvisibility=internal
+ARM_LDFLAGS = -Wl,--relocatable -nostartfiles --specs=nano.specs
+ARM_LDFLAGS += -Wl,-e,main -Wl,-u,eadk_app_name -Wl,-u,eadk_app_icon -Wl,-u,eadk_api_level
+ARM_LDFLAGS += -Wl,--gc-sections -flinker-output=nolto-rel
+APP_SRC = $(CORE) core/flash.c numworks/main.c
+
+.PHONY: nwa nwa-check
+nwa: $(BUILD)/nwgba.nwa
+
+$(BUILD)/icon.o: numworks/icon.png | $(BUILD)
+	$(NWLINK) png-icon-o $< $@
+
+$(BUILD)/nwgba.nwa: $(APP_SRC) $(HEADERS) $(BUILD)/icon.o
+	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) $(APP_SRC) $(BUILD)/icon.o -o $@
+
+nwa-check: $(BUILD)/nwgba.nwa
+	printf 'none' > $(BUILD)/empty.pack
+	$(NWLINK) nwa-elf --external-data $(BUILD)/empty.pack $< $(BUILD)/nwgba.elf
+	arm-none-eabi-size -A $(BUILD)/nwgba.elf | grep -E "section|\.text|\.rodata|\.data|\.bss"
+
+# ---- the calculator front end, run on the PC against stand-in EADK calls ----
+#   make sim  ->  build/numworks-sim GAME.pack FRAMES OUTDIR [RAM-KB] [KEYS] [MS-PER-FRAME]
+EADK_INC = $(shell $(NWLINK) eadk-cflags-device | sed 's/.*"-I\([^"]*\)".*/\1/')
+.PHONY: sim
+sim: $(BUILD)/numworks-sim
+$(BUILD)/numworks-sim: $(CORE) core/flash.c numworks/main.c host/numworks_sim.c $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) -DNWGBA_CALC -DNW_SIM -DPLATFORM_DEVICE=1 -Dmain=app_main -I"$(EADK_INC)" -c numworks/main.c -o $(BUILD)/sim_main.o
+	$(CC) $(CFLAGS) -DNWGBA_CALC -DPLATFORM_DEVICE=1 -I"$(EADK_INC)" $(CORE) core/flash.c host/numworks_sim.c $(BUILD)/sim_main.o -o $@
+
 # ---- instruction count on an emulated Cortex-M7 (see bench/main.c) --------
 #   make bench ROM=game.gba [FRAMES=600] [SKIP=0] [KEYS="300:S 420:A"]
 #   make profile ...the same... [DRAW=1] [FUNC=name]   where the instructions go
 #     (tools/qprof, a QEMU plugin; FUNC: also list that function's machine code)
-ARM_CC ?= arm-none-eabi-gcc
 FRAMES ?= 600
 SKIP ?= 0
 KEYS ?=

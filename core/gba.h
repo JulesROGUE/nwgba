@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "pack.h"
+#include "save.h"
 
 #define GBA_W 240
 #define GBA_H 160
@@ -133,9 +134,8 @@ struct Gba {
   Pack pack;
   uint8_t pal[1024], oam[1024];
   uint16_t io[0x200];
-  uint8_t* save;                  /* 64 KB (SRAM or flash), or NULL */
+  SaveStore save;                 /* what the game saves (save.h) */
   uint8_t saveType;               /* GBA_SAVE_... */
-  bool saveDirty;
   uint8_t flashState, flashCmd, flashStep;
 
   Timer timer[4];
@@ -156,11 +156,11 @@ struct Gba {
 /* gba.c */
 /* pack: the game (copied); mem: memBytes of RAM for the fast RAM and the
  * frames, 4-aligned (at least GBA_MEM_MIN; GBA_MEM_ALL makes every page
- * real); save: 64 KB or NULL */
+ * real); save, saveBytes: where the game's saves are kept (save.h) */
 #define GBA_FRAME_COST (PG_SIZE + 2u)
 #define GBA_MEM_MIN (IWRAM_SIZE + 64u * GBA_FRAME_COST)
 #define GBA_MEM_ALL (IWRAM_SIZE + (EWRAM_PAGES + VRAM_PAGES + 1u) * GBA_FRAME_COST)
-void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint32_t memBytes, uint8_t* save);
+void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint32_t memBytes, uint8_t* save, uint32_t saveBytes);
 void gba_runFrame(Gba* g);
 void gba_raiseIrq(Gba* g, uint32_t bits);
 /* something that decides whether an interrupt is taken changed: the CPU loop stops to look */

@@ -6,8 +6,19 @@
   "bin": {
     "gba2nw": "bin/gba2nw.js"
   },
-  "files": ["bin", "lib", "runtime", "README.md"],
+  "files": [
+    "bin",
+    "lib",
+    "runtime",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18"
+  },
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "dependencies": {
+    "nwlink": "1.0.0"
   }
 }

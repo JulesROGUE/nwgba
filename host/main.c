@@ -93,10 +93,9 @@ int main(int argc, char** argv) {
     return 1;
   }
   uint8_t* mem = calloc(1, memBytes);
-  uint8_t* save = malloc(0x10000);
-  memset(save, 0xff, 0x10000);
+  uint8_t* save = calloc(1, SAVE_BYTES(255));
   const GbaHost host = {&h, hostLine, hostLog};
-  gba_init(&g, &host, &pack, mem, memBytes, save);
+  gba_init(&g, &host, &pack, mem, memBytes, save, SAVE_BYTES(255));
   uint64_t instrs = 0, busiest = 0, idle = 0;
   for(int i = 0; i < frames; i++) {
     g.keys = scriptKeys(keys, (uint32_t)i);
@@ -129,6 +128,7 @@ int main(int argc, char** argv) {
   fprintf(stderr, "real RAM for pages: %u KB used at most, of %u KB",
           (unsigned)((g.nFrames - 1 - g.lowFree) * PG_SIZE / 1024), (unsigned)((g.nFrames - 1) * PG_SIZE / 1024));
   if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);
+  if(save_used(&g.save)) fprintf(stderr, "; save memory: %u pages of 256 bytes written", (unsigned)save_used(&g.save));
   fprintf(stderr, "\n");
   return g.outOfMemory ? 2 : 0;
 }

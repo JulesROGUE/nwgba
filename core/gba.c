@@ -25,13 +25,13 @@ void gba_logf(Gba* g, const char* fmt, ...) {
 }
 #endif
 
-void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint32_t memBytes, uint8_t* save) {
+void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint32_t memBytes, uint8_t* save, uint32_t saveBytes) {
   memset(g, 0, sizeof *g);
   g->host = *host;
   g->pack = *pack;
   g->romSize = pack->romSize;
   g->saveType = (uint8_t)pack->saveType;
-  g->save = save;
+  save_attach(&g->save, save, saveBytes, pack->key);
   /* the memory given: the fast RAM, then the list of free frames, then the frames */
   g->iwram = mem;
   mem += IWRAM_SIZE;

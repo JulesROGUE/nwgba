@@ -25,6 +25,7 @@ bool pack_open(Pack* p, const uint8_t* part1, uint32_t avail) {
   p->blocks = pack_u32(part1 + 48);
   p->split = pack_u32(part1 + 52);
   p->saveType = pack_u32(part1 + 56);
+  p->key = pack_u32(part1 + 64 + 12) ^ p->romSize;
   if(p->size1 > avail || p->split > p->blocks || data + (uint64_t)p->split * PACK_BLOCK != p->size1 ||
      (uint64_t)(p->blocks - p->split) * PACK_BLOCK != p->size2 || (p->romSize & (PACK_BLOCK - 1)))
     return false;
@@ -54,6 +55,7 @@ void pack_plain(Pack* p, const uint8_t* rom, uint32_t romSize, uint8_t* table) {
   p->pageTable = table;
   p->runs = run;
   p->nRuns = 1;
+  p->key = romSize >= 0xb0 ? pack_u32(rom + 0xac) ^ romSize : romSize;
 }
 
 const uint8_t* pack_run(const Pack* p, uint32_t page, uint32_t* first, uint32_t* pages) {

@@ -70,9 +70,16 @@ static void outNum(uint64_t v) {
   out(buf + n);
 }
 
+/* BENCH_RAM_KB: the memory for the fast RAM and the pages, as on the calculator (default: all pages real) */
+#ifdef BENCH_RAM_KB
+#define MEM_BYTES (BENCH_RAM_KB * 1024u)
+#else
+#define MEM_BYTES GBA_MEM_ALL
+#endif
 static Gba g;
-static uint8_t ram[(EWRAM_PAGES + IWRAM_PAGES + VRAM_PAGES) * PG_SIZE];
-static uint8_t save[0x10000];
+static uint8_t mem[MEM_BYTES] __attribute__((aligned(4)));
+static uint8_t save[SAVE_BYTES(64)] __attribute__((aligned(4)));
+static uint8_t plainTable[0x10000];   /* for a ROM as it is, up to 8 MB */
 static uint16_t sink[GBA_W];
 static uint32_t checksum;
 
@@ -89,10 +96,17 @@ __attribute__((noinline, used)) void bench_mark_stop(void) { __asm__ volatile("n
 /* drawEvery: 1 = every frame, 0 = never, n = one frame out of n */
 static void run(uint32_t drawEvery, const char* label) {
   const GbaHost host = {0, line, 0};
-  memset(ram, 0, sizeof ram);
-  memset(save, 0xff, sizeof save);
-  gba_init(&g, &host, bench_rom, bench_rom_size, ram, save);
-  g.saveType = GBA_SAVE_FLASH;
+  /* a pack made by gba2nw, or a ROM as it is */
+  Pack pack;
+  if(pack_open(&pack, bench_rom, bench_rom_size)) {
+    pack_second(&pack, bench_rom + pack.size1);
+  } else {
+    pack_plain(&pack, bench_rom, bench_rom_size & ~(PACK_BLOCK - 1), plainTable);
+    pack.saveType = GBA_SAVE_FLASH;
+  }
+  memset(mem, 0, sizeof mem);
+  memset(save, 0, sizeof save);
+  gba_init(&g, &host, &pack, mem, sizeof mem, save, sizeof save);
   uint64_t t0 = 0, worst = 0;
   uint32_t i0 = 0;
   for(uint32_t f = 0; f < BENCH_SKIP + BENCH_FRAMES; f++) {
@@ -110,14 +124,12 @@ static void run(uint32_t drawEvery, const char* label) {
   }
   const uint64_t t = ticks() - t0;
   bench_mark_stop();
-  out("rom ");
-  outNum(bench_rom_size);
-  out(" bytes, first word ");
-  outNum(ld32(bench_rom));
-  out(", pc ");
-  outNum(g.cpu.r[15]);
-  out(", game instructions per frame ");
+  out("game instructions per frame ");
   outNum((g.instrs - i0) / BENCH_FRAMES);
+  out(", real RAM for pages ");
+  outNum((g.nFrames - 1 - g.lowFree) * PG_SIZE / 1024);
+  out(" KB at most");
+  if(g.outOfMemory) out(", OUT OF MEMORY");
   out("\n");
   out(label);
   out(": ");

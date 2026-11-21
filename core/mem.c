@@ -328,24 +328,22 @@ static void ioWrite8(Gba* g, uint32_t a, uint32_t v) {
 
 static uint32_t saveRead(Gba* g, uint32_t a) {
   a &= 0xffff;
-  if(!g->save) return 0xff;
+  if(g->saveType == GBA_SAVE_NONE) return 0xff;
   if(g->flashState == 0x90 && a < 2) return a ? 0x1b : 0x32;   /* a Panasonic 64 KB flash */
-  return g->save[a];
+  return save_get(&g->save, a);
 }
 
 static void saveWrite(Gba* g, uint32_t a, uint32_t v) {
   a &= 0xffff;
   v &= 0xff;
-  if(!g->save) return;
+  if(g->saveType == GBA_SAVE_NONE) return;
   if(g->saveType != GBA_SAVE_FLASH) {
-    g->save[a] = (uint8_t)v;
-    g->saveDirty = true;
+    save_put(&g->save, a, v);
     return;
   }
   /* flash: commands are three writes, AA to 5555, 55 to 2AAA, then the command */
   if(g->flashCmd == 0xa0) {   /* program one byte */
-    g->save[a] &= (uint8_t)v;
-    g->saveDirty = true;
+    save_put(&g->save, a, save_get(&g->save, a) & v);
     g->flashCmd = 0;
     return;
   }
@@ -361,13 +359,11 @@ static void saveWrite(Gba* g, uint32_t a, uint32_t v) {
   } else if(g->flashStep == 2) {
     g->flashStep = 0;
     if(v == 0x30 && g->flashCmd == 0x80) {   /* erase a 4 KB sector */
-      memset(g->save + (a & 0xf000), 0xff, 0x1000);
-      g->saveDirty = true;
+      save_erase(&g->save, a & 0xf000, 0x1000);
       g->flashCmd = 0;
     } else if(a == 0x5555) {
       if(v == 0x10 && g->flashCmd == 0x80) {
-        memset(g->save, 0xff, 0x10000);
-        g->saveDirty = true;
+        save_erase(&g->save, 0, 0x10000);
         g->flashCmd = 0;
       } else if(v == 0x90) {
         g->flashState = 0x90;
