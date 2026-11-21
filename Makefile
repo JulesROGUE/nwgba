@@ -27,10 +27,10 @@ ARM_CC ?= arm-none-eabi-gcc
 ARM_CFLAGS = -std=c11 -O2 -Wall -Wextra -DNWGBA_CALC
 ARM_CFLAGS += $(shell $(NWLINK) eadk-cflags-device)
 ARM_CFLAGS += -fdata-sections -ffunction-sections
-ARM_CFLAGS += -flto -fno-fat-lto-objects -fwhole-program -fvisibility=internal
+ARM_CFLAGS += -fvisibility=internal
 ARM_LDFLAGS = -Wl,--relocatable -nostartfiles --specs=nano.specs
 ARM_LDFLAGS += -Wl,-e,main -Wl,-u,eadk_app_name -Wl,-u,eadk_app_icon -Wl,-u,eadk_api_level
-ARM_LDFLAGS += -Wl,--gc-sections -flinker-output=nolto-rel
+ARM_LDFLAGS += -Wl,--gc-sections
 APP_SRC = $(CORE) core/flash.c numworks/main.c
 
 .PHONY: nwa nwa-check
@@ -39,8 +39,15 @@ nwa: $(BUILD)/nwgba.nwa
 $(BUILD)/icon.o: numworks/icon.png | $(BUILD)
 	$(NWLINK) png-icon-o $< $@
 
-$(BUILD)/nwgba.nwa: $(APP_SRC) $(HEADERS) $(BUILD)/icon.o
-	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) $(APP_SRC) $(BUILD)/icon.o -o $@
+# The core is compiled as one piece (core/all.c): the compiler sees it whole,
+# and the code that results misses the processor's small cache less often
+# than what link-time optimisation made of the separate files.
+$(BUILD)/nwa/all.o: core/all.c $(CORE) $(HEADERS)
+	@mkdir -p $(BUILD)/nwa
+	$(ARM_CC) $(ARM_CFLAGS) -c $< -o $@
+
+$(BUILD)/nwgba.nwa: $(BUILD)/nwa/all.o core/flash.c numworks/main.c $(HEADERS) $(BUILD)/icon.o
+	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) $(BUILD)/nwa/all.o core/flash.c numworks/main.c $(BUILD)/icon.o -o $@
 
 nwa-check: $(BUILD)/nwgba.nwa
 	printf 'none' > $(BUILD)/empty.pack
@@ -64,15 +71,21 @@ FRAMES ?= 600
 SKIP ?= 0
 KEYS ?=
 BENCH_CFLAGS = -std=c11 -O2 -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
-  -fdata-sections -ffunction-sections -flto -DNWGBA_CALC \
+  -fdata-sections -ffunction-sections -DNWGBA_CALC \
   -DBENCH_FRAMES=$(FRAMES) -DBENCH_SKIP=$(SKIP) '-DBENCH_KEYS="$(KEYS)"' $(BENCH_DEFS)
 QEMU = qemu-system-arm -M mps2-an500 -cpu cortex-m7 -nographic -monitor none -serial none \
   -icount shift=0 -semihosting-config enable=on,target=native
 .PHONY: bench bench-elf profile
-bench-elf: $(CORE) bench/main.c bench/startup.c bench/mps2.ld $(HEADERS) | $(BUILD)
+BENCH_CPU = -std=c11 -O2 -g -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
+  -fdata-sections -ffunction-sections -DNWGBA_CALC
+BENCH_OBJS = $(BUILD)/bench/all.o
+$(BUILD)/bench/all.o: core/all.c $(CORE) $(HEADERS)
+	@mkdir -p $(BUILD)/bench
+	$(ARM_CC) $(BENCH_CPU) -c $< -o $@
+bench-elf: $(BENCH_OBJS) bench/main.c bench/startup.c bench/mps2.ld $(HEADERS) | $(BUILD)
 	@test -n "$(ROM)" || (echo "usage: make bench ROM=game.gba"; exit 1)
 	printf '.section .game,"a"\n.global bench_rom\n.balign 4\nbench_rom:\n.incbin "%s"\nbench_rom_end:\n.section .rodata\n.global bench_rom_size\n.balign 4\nbench_rom_size:\n.word bench_rom_end - bench_rom\n' "$(ROM)" > $(BUILD)/bench_rom.S
-	$(ARM_CC) $(BENCH_CFLAGS) $(CORE) bench/main.c bench/startup.c $(BUILD)/bench_rom.S \
+	$(ARM_CC) $(BENCH_CFLAGS) $(BENCH_OBJS) bench/main.c bench/startup.c $(BUILD)/bench_rom.S \
 	  -nostartfiles --specs=nano.specs --specs=nosys.specs -Wl,--gc-sections -T bench/mps2.ld -o $(BUILD)/bench.elf
 bench: bench-elf
 	$(QEMU) -kernel $(BUILD)/bench.elf

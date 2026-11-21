@@ -1,7 +1,7 @@
 /*
  * qprof - a QEMU TCG plugin: between two marker functions, counts for each
  * address the instructions executed there, and plays the two caches of the
- * calculator's processor (a Cortex-M7: 16 KB for code, 2 ways; 16 KB for
+ * calculator's processor (a Cortex-M7: 8 KB for code, 2 ways; 8 KB for
  * data, 4 ways; lines of 32 bytes) to count the misses. What is in flash
  * (the code, the constants, the game) and what is in RAM are told apart: on
  * the calculator a miss in flash costs a read of the external flash chip,
@@ -56,7 +56,8 @@ typedef struct Cache {
   uint32_t sets, ways;
   uint32_t line[256][4];
 } Cache;
-static Cache icache = {256, 2, {{0}}}, dcache = {128, 4, {{0}}};
+/* the calculator's processor (STM32F730): 8 KB for code, two ways; 8 KB for data, four ways */
+static Cache icache = {128, 2, {{0}}}, dcache = {64, 4, {{0}}};
 static void cacheReset(Cache* c) { memset(c->line, 0xff, sizeof c->line); }
 static int cacheTouch(Cache* c, uint32_t addr) {   /* 1: a miss */
   const uint32_t l = addr >> LINE;

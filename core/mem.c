@@ -282,7 +282,7 @@ static uint32_t ioRead(Gba* g, uint32_t a) {   /* a: even offset */
   }
 }
 
-static int32_t ref28(const Gba* g, uint32_t a) {
+static int32_t ioRef28(const Gba* g, uint32_t a) {
   const uint32_t v = g->io[a >> 1] | (uint32_t)g->io[(a + 2) >> 1] << 16;
   return (int32_t)(v << 4) >> 4;
 }
@@ -294,10 +294,10 @@ static void ioWrite(Gba* g, uint32_t a, uint32_t v) {   /* a: even offset, v: 16
   switch(a) {
     case REG_DISPSTAT: *reg = (uint16_t)((*reg & 7) | (v & 0xff38)); return;
     case REG_VCOUNT: return;
-    case 0x28: case 0x2a: *reg = (uint16_t)v; g->bgRefX[0] = ref28(g, 0x28); return;
-    case 0x2c: case 0x2e: *reg = (uint16_t)v; g->bgRefY[0] = ref28(g, 0x2c); return;
-    case 0x38: case 0x3a: *reg = (uint16_t)v; g->bgRefX[1] = ref28(g, 0x38); return;
-    case 0x3c: case 0x3e: *reg = (uint16_t)v; g->bgRefY[1] = ref28(g, 0x3c); return;
+    case 0x28: case 0x2a: *reg = (uint16_t)v; g->bgRefX[0] = ioRef28(g, 0x28); return;
+    case 0x2c: case 0x2e: *reg = (uint16_t)v; g->bgRefY[0] = ioRef28(g, 0x2c); return;
+    case 0x38: case 0x3a: *reg = (uint16_t)v; g->bgRefX[1] = ioRef28(g, 0x38); return;
+    case 0x3c: case 0x3e: *reg = (uint16_t)v; g->bgRefY[1] = ioRef28(g, 0x3c); return;
     case 0xba: dmaCtrl(g, 0, v); return;
     case 0xc6: dmaCtrl(g, 1, v); return;
     case 0xd2: dmaCtrl(g, 2, v); return;

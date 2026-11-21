@@ -37,7 +37,9 @@ Ce que ça ne sait pas faire : un jeu qui a besoin de plus de vraie mémoire qu'
 
 `make bench ROM=jeu.pack` exécute le cœur, compilé comme pour la calculatrice, sur un Cortex-M7 émulé par QEMU, et compte les instructions par image. Repère : sur ce même banc, nwsnes coûte environ 3,3 millions d'instructions par image pour Donkey Kong Country tel qu'il se joue sur la calculatrice, où il tourne à sa vitesse normale.
 
-Ce banc compte des instructions, pas du temps, et la calculatrice en a décidé autrement : son processeur n'a que 16 Ko de cache pour le code et 16 Ko pour les données, et tout ce qui n'y est pas se relit dans la puce de flash, ce qui coûte des centaines d'instructions. `make profile` joue donc aussi ces deux caches (`tools/qprof`, un greffon QEMU) et compte les défauts, fonction par fonction.
+Ce banc compte des instructions, pas du temps, et la calculatrice en a décidé autrement : son processeur (un STM32F730) n'a que 8 Ko de cache pour le code et 8 Ko pour les données, et tout ce qui n'y est pas se relit dans la puce de flash. `make profile` joue donc aussi ces deux caches (`tools/qprof`, un greffon QEMU) et compte les défauts, fonction par fonction.
+
+Les temps relevés sur une vraie N0110 collent à une règle simple : **6,5 ns par instruction, plus 1,3 µs par défaut de cache dans la flash**. Une image d'Advance Wars en bataille, sans la dessiner : 1,1 million d'instructions (7 ms) et 10 000 défauts (14 ms), soit les 21 ms mesurés. Les deux tiers du temps sont donc des relectures de la flash : l'interprète fait 14 Ko, et ce qui sert à chaque image ne tient pas dans 8 Ko. (Les premières versions de ce banc jouaient des caches de 16 Ko, deux fois trop grands : les chiffres de défauts d'avant sont trop bas.)
 
 Advance Wars, dans une carte de bataille :
 
@@ -45,7 +47,8 @@ Advance Wars, dans une carte de bataille :
 |---|---|---|---|
 | instructions, sans dessiner | 4,7 millions | 2,0 millions | 1,1 million |
 | instructions, en dessinant | 6,8 millions | 3,0 millions | 2,2 millions |
-| défauts du cache de code, en dessinant | | 14 300 | 3 400 |
+| défauts de cache dans la flash, en dessinant (caches de 8 Ko) | | | 11 800 |
+| temps sur la calculatrice : sans dessiner / en dessinant | | | 21 ms / 36 ms (41 ms étiré) |
 
 Ce qui a compté :
 
