@@ -77,6 +77,7 @@ typedef struct Timer {
 
 /* interrupt handlers seen to do nothing (irqm.c) */
 #define IRQM_SLOTS 6
+#define ROM_WINDOWS 4
 #define IRQM_READS 16
 typedef struct IrqMemo {
   uint16_t source;              /* the interrupts taken together (IE & IF); 0: unused */
@@ -170,6 +171,11 @@ struct Gba {
   bool outOfMemory;               /* a page needed a frame and there was none: the game cannot go on */
   uint32_t leftOutReads;          /* reads of ROM pages the pack left out */
   Pack pack;
+  struct RomWindow {              /* stretches of ROM read as data before the two at hand */
+    const uint8_t* ptr;
+    uint32_t base, len;
+  } romW[ROM_WINDOWS];
+  uint8_t romWNext;
   uint8_t pal[1024], oam[1024];
   uint16_t io[0x200];
   SaveStore save;                 /* what the game saves (save.h) */

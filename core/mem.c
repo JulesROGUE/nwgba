@@ -56,35 +56,61 @@ static const uint8_t* romOther(Gba* g, uint32_t page) {
 }
 
 /* n bytes (1 to 4) of ROM at off, in one piece: where they are, or NULL
- * (past the end, or across two pieces) */
+ * (past the end, or across two pieces).
+ *
+ * The stretch of ROM last read is at hand (romPtr), and the one before
+ * (games go back and forth between two); four older ones are kept behind.
+ * A new one comes from the pack's table of pages: the page asked for and up
+ * to eight stored right before and after it. (Looking the whole stretch up
+ * in the pack's list is a search through a table in flash, and a game with
+ * many holes in its ROM that reads from three places in turn did it eight
+ * hundred times a frame.) */
+#define ROM_REACH 8u
 static const uint8_t* romSlow(Gba* g, uint32_t off, uint32_t n) {
   if(off >= g->romSize) return NULL;
-  if(off - g->rom2Base < g->rom2Len) {   /* the stretch before the last: games go back and forth between two */
-    const uint8_t* const p = g->rom2Ptr;
-    const uint32_t b = g->rom2Base, l = g->rom2Len;
-    g->rom2Ptr = g->romPtr;
-    g->rom2Base = g->romBase;
-    g->rom2Len = g->romLen;
-    g->romPtr = p;
-    g->romBase = b;
-    g->romLen = l;
-    return p + (off - b);
-  }
-  uint32_t first, pages;
-  const uint8_t* run = pack_run(&g->pack, off >> PG_SHIFT, &first, &pages);
-  if(run) {
-    const uint32_t base = first << PG_SHIFT, len = pages << PG_SHIFT;
-    if(len > 3) {
-      g->rom2Ptr = g->romPtr;
-      g->rom2Base = g->romBase;
-      g->rom2Len = g->romLen;
-      g->romPtr = run;
-      g->romBase = base;
-      g->romLen = len - 3;
+  const uint8_t* ptr;
+  uint32_t base, len;
+  if(off - g->rom2Base < g->rom2Len) {
+    ptr = g->rom2Ptr;
+    base = g->rom2Base;
+    len = g->rom2Len;
+  } else {
+    int i = 0;
+    while(i < ROM_WINDOWS && off - g->romW[i].base >= g->romW[i].len) i++;
+    if(i == ROM_WINDOWS) {
+      const Pack* p = &g->pack;
+      const uint32_t page = off >> PG_SHIFT, k = pack_u16(p->pageTable + 2 * page);
+      if(k >= PACK_ONES) return (off & PG_MASK) + n <= PG_SIZE ? romOther(g, page) + (off & PG_MASK) : NULL;
+      const uint8_t* const at = pack_block(p, k);
+      const uint32_t pages = g->romSize >> PG_SHIFT;
+      uint32_t before = 0, after = 1;
+      while(before < ROM_REACH && before < page && before < k && pack_u16(p->pageTable + 2 * (page - before - 1)) == k - before - 1 &&
+            pack_block(p, k - before - 1) == at - ((size_t)(before + 1) << PG_SHIFT))
+        before++;
+      while(after <= ROM_REACH && page + after < pages && pack_u16(p->pageTable + 2 * (page + after)) == k + after &&
+            pack_block(p, k + after) == at + ((size_t)after << PG_SHIFT))
+        after++;
+      ptr = at - ((size_t)before << PG_SHIFT);
+      base = (page - before) << PG_SHIFT;
+      len = ((before + after) << PG_SHIFT) - 3;
+      i = g->romWNext;   /* the oldest of the four makes room */
+      g->romWNext = (uint8_t)((i + 1) % ROM_WINDOWS);
+    } else {
+      ptr = g->romW[i].ptr;
+      base = g->romW[i].base;
+      len = g->romW[i].len;
     }
-    return off - base + n <= len ? run + (off - base) : NULL;
+    g->romW[i].ptr = g->rom2Ptr;
+    g->romW[i].base = g->rom2Base;
+    g->romW[i].len = g->rom2Len;
   }
-  return (off & PG_MASK) + n <= PG_SIZE ? romOther(g, off >> PG_SHIFT) + (off & PG_MASK) : NULL;
+  g->rom2Ptr = g->romPtr;
+  g->rom2Base = g->romBase;
+  g->rom2Len = g->romLen;
+  g->romPtr = ptr;
+  g->romBase = base;
+  g->romLen = len;
+  return off - base + n <= len + 3 ? ptr + (off - base) : NULL;
 }
 static inline const uint8_t* romAt(Gba* g, uint32_t a, uint32_t n) {
   const uint32_t off = a & 0x01ffffffu;
@@ -907,6 +933,8 @@ void mem_reset(Gba* g) {
   g->lowFree = g->nFree;
   g->outOfMemory = false;
   g->romLen = g->rom2Len = 0;
+  memset(g->romW, 0, sizeof g->romW);
+  g->romWNext = 0;
   g->io[REG_DISPCNT >> 1] = 0x0080;
   g->io[REG_BG2PA >> 1] = g->io[(REG_BG2PA + 6) >> 1] = 0x100;
   g->io[REG_BG3PA >> 1] = g->io[(REG_BG3PA + 6) >> 1] = 0x100;

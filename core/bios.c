@@ -93,11 +93,13 @@ static void skipMixer(Gba* g, uint32_t src, uint32_t dst, uint32_t bytes) {
   if(src < 0x08000000u || (dst >> 24) < 2 || (dst >> 24) > 3 || bytes < 0x200) return;
   const uint32_t keep = g->cycles, end = dst + bytes;
   for(uint32_t a = dst; a + 16 <= end; a += 4) {
-    if(mem_r32(g, a) != 0xe58d8000u) continue;                       /* str r8, [sp] */
-    if((mem_r32(g, a + 4) & 0xfffff000u) != 0xe5d4a000u) continue;   /* ldrb r10, [r4, #..] */
-    if((mem_r32(g, a + 8) & 0xfffff000u) != 0xe5d4b000u) continue;   /* ldrb r11, [r4, #..] */
-    if(mem_r32(g, a + 12) != 0xe1a0a80au) continue;                  /* lsl r10, r10, #16 */
-    for(uint32_t e = a + 16; e + 12 <= end; e += 4) {
+    if(mem_r32(g, a) != 0xe58d8000u) continue;   /* str r8, [sp] */
+    /* then the two volumes of the channel, at once or (older drivers) after one other load:
+     * ldrb r10, [r4, #..]; ldrb r11, [r4, #..] */
+    uint32_t v = a + 4;
+    if((mem_r32(g, v) & 0xfffff000u) != 0xe5d4a000u) v += 4;
+    if((mem_r32(g, v) & 0xfffff000u) != 0xe5d4a000u || (mem_r32(g, v + 4) & 0xfffff000u) != 0xe5d4b000u) continue;
+    for(uint32_t e = v + 8; e + 12 <= end; e += 4) {
       /* ldr r8, [sp]; add r0, pc, #1; bx r0 */
       if(mem_r32(g, e) != 0xe59d8000u || mem_r32(g, e + 4) != 0xe28f0001u || mem_r32(g, e + 8) != 0xe12fff10u) continue;
       mem_w32(g, a, 0xea000000u | (((e + 4 - (a + 8)) >> 2) & 0x00ffffffu));
