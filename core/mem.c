@@ -598,7 +598,7 @@ void mem_w16(Gba* g, uint32_t a, uint32_t v) {
       PAGE_PUT(16, &g->vrR[o >> PG_SHIFT], &g->vrS[o >> PG_SHIFT], o & PG_MASK, a, v);
       return;
     }
-    case 7: g->cycles++; put16(g, a, g->oam + (a & 0x3fe), v); return;
+    case 7: g->cycles++; g->oamDirty = true; put16(g, a, g->oam + (a & 0x3fe), v); return;
     case 14: case 15: g->cycles += 5; g->busy = 1; saveWrite(g, a, v); return;
     default: g->cycles++; return;
   }
@@ -634,7 +634,7 @@ void mem_w32(Gba* g, uint32_t a, uint32_t v) {
       PAGE_PUT(32, &g->vrR[o >> PG_SHIFT], &g->vrS[o >> PG_SHIFT], o & PG_MASK, a, v);
       return;
     }
-    case 7: g->cycles++; put32(g, a, g->oam + (a & 0x3fc), v); return;
+    case 7: g->cycles++; g->oamDirty = true; put32(g, a, g->oam + (a & 0x3fc), v); return;
     case 14: case 15: g->cycles += 5; g->busy = 1; saveWrite(g, a, v); return;
     default: g->cycles++; return;
   }
@@ -655,7 +655,7 @@ void mem_poke8(Gba* g, uint32_t a, uint32_t v) {
     }
     case 3: g->iwram[a & IWRAM_MASK] = (uint8_t)v; return;
     case 5: g->pal[a & 0x3ff] = (uint8_t)v; g->palDirty = true; return;
-    case 7: g->oam[a & 0x3ff] = (uint8_t)v; return;
+    case 7: g->oam[a & 0x3ff] = (uint8_t)v; g->oamDirty = true; return;
     default: mem_w8(g, a, v); return;
   }
 }
@@ -736,7 +736,10 @@ static void store(Gba* g, uint32_t dst, const uint8_t* s, uint32_t n) {
         g->palDirty = true;
       }
       return;
-    case 7: memmove(g->oam + (dst & 0x3ff), s, n); return;
+    case 7:
+      memmove(g->oam + (dst & 0x3ff), s, n);
+      g->oamDirty = true;
+      return;
     default: return;
   }
 }
@@ -853,6 +856,6 @@ void mem_reset(Gba* g) {
   g->io[REG_BG3PA >> 1] = g->io[(REG_BG3PA + 6) >> 1] = 0x100;
   g->io[0x88 >> 1] = 0x200;        /* SOUNDBIAS */
   g->io[REG_POSTFLG >> 1] = 1;
-  g->palDirty = true;
+  g->palDirty = g->oamDirty = true;
   mem_waitcnt(g);
 }

@@ -146,6 +146,12 @@ struct Gba {
 
   uint16_t pal565[512];           /* the palette as display colours */
   bool palDirty;
+  bool oamDirty;                  /* the sprite table was written: the list below is out of date */
+  uint8_t nObjs;
+  struct {
+    int16_t y;                    /* first line */
+    uint8_t h, index;             /* lines, and which sprite */
+  } objs[128];                    /* the sprites that can show, last first (ppu.c) */
   bool render;                    /* draw this frame */
   uint32_t frame;
   uint32_t idleSnap[21];          /* waiting loops: registers and flags the time before */

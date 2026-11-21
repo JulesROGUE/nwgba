@@ -20,7 +20,35 @@ static void palRefresh(Gba* g) {
 
 /* ---------------------------------------------------------- backgrounds -- */
 
-static void lineText(Gba* g, int bg, int y, uint16_t* out, uint8_t* lay) {
+/* eight pixels of a 16-colour tile, wholly on the screen; lay: also note the layer */
+static inline __attribute__((always_inline)) void tile16(uint32_t d, const uint16_t* pal, uint16_t* out, uint8_t* lay, uint32_t layer) {
+  if(!((d - 0x11111111u) & ~d & 0x88888888u)) {   /* no see-through pixel */
+    out[0] = pal[d & 15];
+    out[1] = pal[(d >> 4) & 15];
+    out[2] = pal[(d >> 8) & 15];
+    out[3] = pal[(d >> 12) & 15];
+    out[4] = pal[(d >> 16) & 15];
+    out[5] = pal[(d >> 20) & 15];
+    out[6] = pal[(d >> 24) & 15];
+    out[7] = pal[d >> 28];
+    if(lay) memset(lay, (int)layer, 8);
+    return;
+  }
+  for(int i = 0; i < 8; i++, d >>= 4) {
+    if(d & 15) {
+      out[i] = pal[d & 15];
+      if(lay) lay[i] = (uint8_t)layer;
+    }
+  }
+}
+/* the eight pixels the other way round */
+static inline uint32_t mirror16(uint32_t d) {
+  d = __builtin_bswap32(d);
+  return (d & 0x0f0f0f0fu) << 4 | ((d >> 4) & 0x0f0f0f0fu);
+}
+
+/* a background of tiles. lay: where the layer of each pixel is noted, or NULL when nobody asks */
+static inline __attribute__((always_inline)) void lineTextAny(Gba* g, int bg, int y, uint16_t* out, uint8_t* lay) {
   const uint32_t cnt = io(g, REG_BG0CNT + (uint32_t)bg * 2);
   const uint32_t charBase = ((cnt >> 2) & 3) << 14, mapBase = ((cnt >> 8) & 31) << 11;
   const uint32_t size = cnt >> 14;
@@ -29,10 +57,16 @@ static void lineText(Gba* g, int bg, int y, uint16_t* out, uint8_t* lay) {
   const uint32_t sy = (io(g, REG_BG0HOFS + 2 + (uint32_t)bg * 4) + (uint32_t)y) & 511;
   uint32_t mapRow = mapBase + ((sy >> 3) & 31) * 64;
   if((size & 2) && (sy & 256)) mapRow += (size & 1) ? 0x1000 : 0x800;
+  /* the row of the map: 32 entries in one page, and 32 more for the wide maps */
+  const uint8_t* const row0 = vr(g, mapRow);
+  const uint8_t* const row1 = (size & 1) ? vr(g, mapRow + 0x800) : row0;
+  const uint32_t fine = sy & 7;
+  uint32_t lastE = 0x10000, lastD = 0;   /* the tile just before: maps repeat themselves, empty tiles most of all */
   int x = -(int)(sx & 7);
   for(uint32_t tx = sx >> 3; x < GBA_W; tx++, x += 8) {
-    const uint32_t e = ld16(vr(g, mapRow + ((tx & 31) << 1) + (((size & 1) && (tx & 32)) ? 0x800 : 0)));
-    const uint32_t row = (e & 0x800) ? 7 - (sy & 7) : (sy & 7);
+    const uint32_t e = ld16(((tx & 32) ? row1 : row0) + ((tx & 31) << 1));
+    if(e == lastE && !lastD) continue;
+    const uint32_t row = (e & 0x800) ? 7 - fine : fine;
     const bool flip = e & 0x400;
     if(bpp8) {
       const uint32_t at = charBase + (e & 0x3ff) * 64 + row * 8;
@@ -42,32 +76,38 @@ static void lineText(Gba* g, int bg, int y, uint16_t* out, uint8_t* lay) {
         const uint32_t c = p[flip ? 7 - i : i];
         if(c && (unsigned)(x + i) < GBA_W) {
           out[x + i] = g->pal565[c];
-          lay[x + i] = (uint8_t)bg;
+          if(lay) lay[x + i] = (uint8_t)bg;
         }
       }
     } else {
-      const uint32_t at = charBase + (e & 0x3ff) * 32 + row * 4;
-      if(at >= 0x10000) continue;
-      uint32_t d = ld32(vr(g, at));
-      if(!d) continue;
-      const uint16_t* pal = g->pal565 + (e >> 12) * 16;
-      if(flip) {
-        for(int i = 7; i >= 0; i--, d >>= 4) {
-          if((d & 15) && (unsigned)(x + i) < GBA_W) {
-            out[x + i] = pal[d & 15];
-            lay[x + i] = (uint8_t)bg;
-          }
-        }
+      uint32_t d;
+      if(e == lastE) {
+        d = lastD;
       } else {
+        const uint32_t at = charBase + (e & 0x3ff) * 32 + row * 4;
+        d = at < 0x10000 ? ld32(vr(g, at)) : 0;
+        if(flip) d = mirror16(d);
+        lastE = e;
+        lastD = d;
+        if(!d) continue;
+      }
+      const uint16_t* pal = g->pal565 + (e >> 12) * 16;
+      if((unsigned)x <= GBA_W - 8) {
+        tile16(d, pal, out + x, lay ? lay + x : NULL, (uint32_t)bg);
+      } else {   /* cut by an edge of the screen */
         for(int i = 0; i < 8; i++, d >>= 4) {
           if((d & 15) && (unsigned)(x + i) < GBA_W) {
             out[x + i] = pal[d & 15];
-            lay[x + i] = (uint8_t)bg;
+            if(lay) lay[x + i] = (uint8_t)bg;
           }
         }
       }
     }
   }
+}
+static void lineText(Gba* g, int bg, int y, uint16_t* out, uint8_t* lay) {
+  if(lay) lineTextAny(g, bg, y, out, lay);
+  else lineTextAny(g, bg, y, out, NULL);
 }
 
 static void lineAffine(Gba* g, int bg, uint16_t* out, uint8_t* lay) {
@@ -90,7 +130,7 @@ static void lineAffine(Gba* g, int bg, uint16_t* out, uint8_t* lay) {
     const uint32_t c = *vr(g, charBase + tile * 64 + (ty & 7) * 8 + (tx & 7));
     if(c) {
       out[i] = g->pal565[c];
-      lay[i] = (uint8_t)bg;
+      if(lay) lay[i] = (uint8_t)bg;
     }
   }
 }
@@ -100,20 +140,20 @@ static void lineBitmap(Gba* g, int mode, int y, uint16_t* out, uint8_t* lay) {
   if(mode == 3) {
     for(int i = 0; i < GBA_W; i++) {
       out[i] = to565(ld16(vr(g, (uint32_t)(y * GBA_W + i) * 2)));
-      lay[i] = 2;
+      if(lay) lay[i] = 2;
     }
   } else if(mode == 4) {
     for(int i = 0; i < GBA_W; i++) {
       const uint32_t c = *vr(g, frame + (uint32_t)(y * GBA_W + i));
       if(c) {
         out[i] = g->pal565[c];
-        lay[i] = 2;
+        if(lay) lay[i] = 2;
       }
     }
   } else if(y < 128) {
     for(int i = 0; i < 160; i++) {
       out[i] = to565(ld16(vr(g, frame + (uint32_t)(y * 160 + i) * 2)));
-      lay[i] = 2;
+      if(lay) lay[i] = 2;
     }
   }
 }
@@ -123,8 +163,9 @@ static void lineBitmap(Gba* g, int mode, int y, uint16_t* out, uint8_t* lay) {
 static const uint8_t kObjW[3][4] = {{8, 16, 32, 64}, {16, 32, 32, 64}, {8, 8, 16, 32}};
 static const uint8_t kObjH[3][4] = {{8, 16, 32, 64}, {8, 8, 16, 32}, {16, 32, 32, 64}};
 
-/* the sprites that cross line y, from the last to the first */
-static int objCollect(const Gba* g, int y, uint8_t* list) {
+/* The sprites that can show at all, from the last to the first, with where
+ * they are down the screen: made again when the sprite table was written */
+static void objList(Gba* g) {
   int n = 0;
   for(int i = 127; i >= 0; i--) {
     const uint32_t a0 = ld16(g->oam + i * 8);
@@ -133,8 +174,22 @@ static int objCollect(const Gba* g, int y, uint8_t* list) {
     if((a0 & 0x300) == 0x300) h *= 2;
     int sy = (int)(a0 & 255);
     if(sy >= GBA_H) sy -= 256;
-    if(y >= sy && y < sy + h) list[n++] = (uint8_t)i;
+    if(sy + h <= 0) continue;
+    g->objs[n].y = (int16_t)sy;
+    g->objs[n].h = (uint8_t)h;
+    g->objs[n].index = (uint8_t)i;
+    n++;
   }
+  g->nObjs = (uint8_t)n;
+  g->oamDirty = false;
+}
+
+/* those that cross line y, in the same order */
+static int objCollect(Gba* g, int y, uint8_t* list) {
+  if(g->oamDirty) objList(g);
+  int n = 0;
+  for(int k = 0; k < g->nObjs; k++)
+    if((unsigned)(y - g->objs[k].y) < g->objs[k].h) list[n++] = g->objs[k].index;
   return n;
 }
 
@@ -166,17 +221,21 @@ static void objDraw(Gba* g, int idx, int y, uint16_t* out, uint8_t* lay) {
           const uint32_t c = p[flip ? 7 - i : i];
           if(c && (unsigned)(x + i) < GBA_W) {
             out[x + i] = pal[c];
-            lay[x + i] = 4;
+            if(lay) lay[x + i] = 4;
           }
         }
       } else {
         uint32_t d = ld32(vr(g, at));
         if(!d) continue;
-        for(int i = 0; i < 8; i++, d >>= 4) {
-          const int px = x + (flip ? 7 - i : i);
-          if((d & 15) && (unsigned)px < GBA_W) {
-            out[px] = pal[d & 15];
-            lay[px] = 4;
+        if(flip) d = mirror16(d);
+        if((unsigned)x <= GBA_W - 8) {
+          tile16(d, pal, out + x, lay ? lay + x : NULL, 4);
+        } else {
+          for(int i = 0; i < 8; i++, d >>= 4) {
+            if((d & 15) && (unsigned)(x + i) < GBA_W) {
+              out[x + i] = pal[d & 15];
+              if(lay) lay[x + i] = 4;
+            }
           }
         }
       }
@@ -202,7 +261,7 @@ static void objDraw(Gba* g, int idx, int y, uint16_t* out, uint8_t* lay) {
     else c = (*vr(g, 0x10000 + t * 32 + (uint32_t)(ty & 7) * 4 + (uint32_t)((tx & 7) >> 1)) >> ((tx & 1) * 4)) & 15;
     if(c) {
       out[x] = pal[c];
-      lay[x] = 4;
+      if(lay) lay[x] = 4;
     }
   }
 }
@@ -216,12 +275,18 @@ void ppu_line(Gba* g, int y, uint16_t* out) {
     return;
   }
   if(g->palDirty) palRefresh(g);
-  uint8_t lay[GBA_W];
-  const uint16_t back = g->pal565[0];
-  for(int i = 0; i < GBA_W; i++) {
-    out[i] = back;
-    lay[i] = 5;
+  /* fades to white or black touch chosen layers only: then the layer of each pixel is noted */
+  const uint32_t bld = io(g, REG_BLDCNT);
+  uint32_t evy = 0;
+  if((bld & 0x80) && (bld & 0x3f)) {
+    evy = io(g, REG_BLDY) & 31;
+    if(evy > 16) evy = 16;
   }
+  uint8_t layers[GBA_W];
+  uint8_t* const lay = evy ? layers : NULL;
+  const uint16_t back = g->pal565[0];
+  for(int i = 0; i < GBA_W; i++) out[i] = back;
+  if(lay) memset(lay, 5, GBA_W);
   const int mode = (int)(dc & 7);
   uint8_t objs[128];
   const int nObjs = (dc & 0x1000) ? objCollect(g, y, objs) : 0;
@@ -235,27 +300,21 @@ void ppu_line(Gba* g, int y, uint16_t* out) {
     for(int k = 0; k < nObjs; k++)
       if((int)((ld16(g->oam + objs[k] * 8 + 4) >> 10) & 3) == prio) objDraw(g, objs[k], y, out, lay);
   }
-  /* fades to white or black of the layers chosen */
-  const uint32_t bld = io(g, REG_BLDCNT);
-  if((bld & 0x80) && (bld & 0x3f)) {
-    uint32_t evy = io(g, REG_BLDY) & 31;
-    if(evy > 16) evy = 16;
-    if(evy) {
-      const bool white = !(bld & 0x40);
-      for(int i = 0; i < GBA_W; i++) {
-        if(!(bld & (1u << lay[i]))) continue;
-        uint32_t r = out[i] >> 11, gr = (out[i] >> 5) & 63, b = out[i] & 31;
-        if(white) {
-          r += ((31 - r) * evy) >> 4;
-          gr += ((63 - gr) * evy) >> 4;
-          b += ((31 - b) * evy) >> 4;
-        } else {
-          r -= (r * evy) >> 4;
-          gr -= (gr * evy) >> 4;
-          b -= (b * evy) >> 4;
-        }
-        out[i] = (uint16_t)(r << 11 | gr << 5 | b);
+  if(evy) {
+    const bool white = !(bld & 0x40);
+    for(int i = 0; i < GBA_W; i++) {
+      if(!(bld & (1u << lay[i]))) continue;
+      uint32_t r = out[i] >> 11, gr = (out[i] >> 5) & 63, b = out[i] & 31;
+      if(white) {
+        r += ((31 - r) * evy) >> 4;
+        gr += ((63 - gr) * evy) >> 4;
+        b += ((31 - b) * evy) >> 4;
+      } else {
+        r -= (r * evy) >> 4;
+        gr -= (gr * evy) >> 4;
+        b -= (b * evy) >> 4;
       }
+      out[i] = (uint16_t)(r << 11 | gr << 5 | b);
     }
   }
 }
