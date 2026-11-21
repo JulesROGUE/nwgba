@@ -76,6 +76,18 @@ static inline void lineSeen(int y, const uint16_t* px) {
 
 static void redrawAll(void) { memset(shown, 0, sizeof shown); }
 
+/* three pixels make four (the first two, the mean of the last two, the last):
+ * the 240 at the start of a row become 320, in place, from the right */
+static void widen(uint16_t* row) {
+  for(int i = GBA_W - 3, o = EADK_SCREEN_WIDTH - 4; i >= 0; i -= 3, o -= 4) {
+    const uint16_t a = row[i], b = row[i + 1], c = row[i + 2];
+    row[o] = a;
+    row[o + 1] = b;
+    row[o + 2] = mean(b, c);
+    row[o + 3] = c;
+  }
+}
+
 static void putLine(void* user, int y, const uint16_t* px) {
   (void)user;
   lineSeen(y, px);
@@ -87,25 +99,26 @@ static void putLine(void* user, int y, const uint16_t* px) {
     }
     return;
   }
-  /* three lines make four: the first two, the mean of the last two, the last */
+  /* Three lines make four: the first two, the mean of the last two, the last.
+   * The lines are kept as they come, and made wider only if the band is sent. */
   const int k = y % 3;
-  uint16_t* out = band + (k == 2 ? 3 : k) * EADK_SCREEN_WIDTH;
-  for(int i = 0; i < GBA_W; i += 3, out += 4) {   /* and three pixels make four, the same way */
-    out[0] = px[i];
-    out[1] = px[i + 1];
-    out[2] = mean(px[i + 1], px[i + 2]);
-    out[3] = px[i + 2];
-  }
+  memcpy(band + (k == 2 ? 3 : k) * EADK_SCREEN_WIDTH, px, GBA_W * sizeof(uint16_t));
   const uint16_t top = (uint16_t)(WIDE_Y + y / 3 * 4);
   if(k == 2) {
     if(bandNew) {
+      widen(band);
+      widen(band + EADK_SCREEN_WIDTH);
+      widen(band + 3 * EADK_SCREEN_WIDTH);
       uint16_t* m = band + 2 * EADK_SCREEN_WIDTH;
       for(int i = 0; i < EADK_SCREEN_WIDTH; i++) m[i] = mean(m[i - EADK_SCREEN_WIDTH], m[i + EADK_SCREEN_WIDTH]);
       eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 4}, (const eadk_color_t*)band);
     }
     bandNew = false;
   } else if(y == GBA_H - 1) {   /* the last line stands alone */
-    if(bandNew) eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 1}, (const eadk_color_t*)band);
+    if(bandNew) {
+      widen(band);
+      eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 1}, (const eadk_color_t*)band);
+    }
     bandNew = false;
   }
 }
