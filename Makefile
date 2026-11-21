@@ -11,7 +11,7 @@ all: host
 host: $(BUILD)/nwgba-host
 
 $(BUILD)/nwgba-host: $(CORE) host/main.c $(HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) -DGBA_STATS -DGBA_TRACE $(CORE) host/main.c -o $@
+	$(CC) $(CFLAGS) -DGBA_STATS $(CORE) host/main.c -o $@
 
 $(BUILD):
 	mkdir -p $@

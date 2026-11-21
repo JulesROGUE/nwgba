@@ -68,7 +68,10 @@ void cpu_setCpsr(Gba* g, uint32_t v) {
 
 /* CPSR back from SPSR (in the modes that have one) */
 static void restoreCpsr(Gba* g) {
-  if(modeIndex(g->cpu.cpsr)) cpu_setCpsr(g, g->cpu.spsr);
+  if(!modeIndex(g->cpu.cpsr)) return;
+  const bool fromIrq = (g->cpu.cpsr & 0x1f) == 0x12;
+  cpu_setCpsr(g, g->cpu.spsr);
+  if(fromIrq && g->irqDepth && --g->irqDepth == 0) g->busy = g->irqBusy;
 }
 
 void cpu_reset(Gba* g) {
@@ -86,7 +89,8 @@ void cpu_reset(Gba* g) {
 /* the interrupt exception, between two instructions */
 void cpu_irq(Gba* g) {
   Cpu* c = &g->cpu;
-  g->busy = 1;
+  if(g->irqDepth >= 8) g->irqDepth = 0;   /* handlers that never return the usual way */
+  if(g->irqDepth++ == 0) g->irqBusy = g->busy;
   const uint32_t old = cpu_getCpsr(c);
   const uint32_t lr = (old & T_BIT) ? c->r[15] : c->r[15] - 4;   /* next instruction + 4 */
   switchMode(c, 0x12);
@@ -237,43 +241,52 @@ static inline uint32_t load16s(Gba* g, uint32_t a) {
 
 #define SNAP_BYTES (21 * sizeof(uint32_t))   /* r0-r15, the flags, cpsr */
 
-/* at a backward jump reached again with nothing written since */
-static void idleSlow(Gba* g) {
+/* at a backward jump reached again with nothing changed since: true if the
+ * state is the same as the time before */
+static bool idleSlow(Gba* g) {
   Cpu* c = &g->cpu;
+  if(g->irqDepth) return false;
   const uint32_t slot = (g->idleAddr >> 1) & 15;
-  if(g->idleReject[slot] == g->idleAddr) return;
+  if(g->idleReject[slot] == g->idleAddr) return false;
+  c->r[15] = g->idleAddr;
   if(g->idleArmed) {
     if(!memcmp(c, g->idleSnap, SNAP_BYTES)) {
-      /* the same state at the same place: nothing will change before the next event */
-      if((int32_t)(g->target - g->cycles) > 0) {
-        g->idleCycles += g->target - g->cycles;
-        g->cycles = g->target;
-      }
       g->idleFails = 0;
-      return;
+      return true;
     }
     if(++g->idleFails >= 8) {   /* a loop that computes without writing: leave it alone */
       g->idleReject[slot] = g->idleAddr;
       g->idleFails = 0;
       g->idleArmed = 0;
-      return;
+      return false;
     }
   }
   memcpy(g->idleSnap, c, SNAP_BYTES);
   g->idleArmed = 1;
+  return false;
 }
 
-/* called at every backward jump taken (r15 tells which) */
-static inline void idleHook(Gba* g) {
-  const uint32_t at = g->cpu.r[15];
-  if(at == g->idleAddr && !g->dirty && !g->busy) {
-    idleSlow(g);
-  } else {
-    g->idleAddr = at;
-    g->idleArmed = 0;
-    g->idleFails = 0;
-    g->dirty = 0;
-    g->busy = 0;
+/* called at every backward jump taken, with its address + 4. True: nothing
+ * can change before the next event, the rest of the slice can be skipped */
+static void idleMiss(Gba* g, uint32_t at) {
+  if(g->irqDepth) return;   /* an interrupt handler's own loops are not watched */
+  g->idleAddr = at;
+  g->idleArmed = 0;
+  g->idleFails = 0;
+  g->dirty = 0;
+  g->busy = 0;
+}
+static inline bool idleHook(Gba* g, uint32_t at) {
+  if(at == g->idleAddr && !g->dirty && !g->busy) return idleSlow(g);
+  idleMiss(g, at);
+  return false;
+}
+
+/* the same, for the code that keeps the clock in g->cycles */
+static void idleCheck(Gba* g) {
+  if(idleHook(g, g->cpu.r[15]) && (int32_t)(g->target - g->cycles) > 0) {
+    g->idleCycles += g->target - g->cycles;
+    g->cycles = g->target;
   }
 }
 
@@ -545,7 +558,7 @@ static void armExec(Gba* g, uint32_t op) {
     case 5: {
       const int32_t off = (int32_t)(op << 8) >> 6;
       if(op & 0x01000000) r[14] = r[15] - 4;
-      else if(off < 0) idleHook(g);
+      else if(off < 0) idleCheck(g);
       armJump(g, r[15] + (uint32_t)off);
       return;
     }
@@ -566,7 +579,9 @@ static inline void thumbJump(Gba* g, uint32_t t) {
   g->cycles += 2 * g->codeCostT;
 }
 
-static inline void thumbExec(Gba* g, uint32_t op) {
+/* any Thumb instruction, the plain way (the main loop below has its own
+ * fast versions of the common ones and sends the rest here) */
+static void thumbExec(Gba* g, uint32_t op) {
   Cpu* c = &g->cpu;
   uint32_t* r = c->r;
   switch(op >> 11) {
@@ -789,13 +804,13 @@ static inline void thumbExec(Gba* g, uint32_t op) {
       if(cc == 15) {
         if(bios_swi(g, op & 0xff)) r[15] -= 2;
       } else if(cond(c, cc)) {
-        if(op & 0x80) idleHook(g);
+        if(op & 0x80) idleCheck(g);
         thumbJump(g, r[15] + (uint32_t)((int32_t)(int8_t)op * 2));
       }
       break;
     }
     case 28:
-      if(op & 0x400) idleHook(g);
+      if(op & 0x400) idleCheck(g);
       thumbJump(g, r[15] + (uint32_t)((int32_t)(op << 21) >> 20));
       break;
     case 30: r[14] = r[15] + (uint32_t)((int32_t)(op << 21) >> 9); break;
@@ -811,48 +826,371 @@ static inline void thumbExec(Gba* g, uint32_t op) {
 
 /* ---------------------------------------------------------------- loop -- */
 
-void cpu_run(Gba* g) {
-  Cpu* c = &g->cpu;
-  while((int32_t)(g->target - g->cycles) > 0) {
+/* The loops below run inside one page of code, with the place in the page
+ * (off) and the cycles left in the slice (left) in local variables. r[15]
+ * and g->cycles are only brought up to date around calls that need them. */
+
+#define SYNC_OUT() (g->cycles = g->target - (uint32_t)left)
+#define SYNC_IN() (left = (int32_t)(g->target - g->cycles))
+
+/* memory, the fast way for the two RAMs and the ROM, else through mem.c */
+#define RD(bits, addr, dst, mask, costE, costR)                                              \
+  do {                                                                                       \
+    const uint32_t a_ = (addr);                                                              \
+    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                       \
+      dst = ld##bits(g->iwR[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK));         \
+      left -= 1;                                                                             \
+    } else if((a_ & (0xfe000000u | (mask))) == 0x08000000u && (a_ & 0x01ffffffu) < g->romSize) { \
+      dst = ld##bits(g->rom + (a_ & 0x01ffffffu));                                           \
+      left -= (int32_t)(costR);                                                              \
+    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                \
+      dst = ld##bits(g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK));         \
+      left -= (costE);                                                                       \
+    } else {                                                                                 \
+      SYNC_OUT();                                                                            \
+      dst = slow##bits(g, a_);                                                               \
+      SYNC_IN();                                                                             \
+    }                                                                                        \
+  } while(0)
+#define ld8(p) (*(const uint8_t*)(p))
+#define slow8(g, a) mem_r8(g, a)
+#define slow16(g, a) load16(g, a)
+#define slow32(g, a) load32(g, a)
+#define RD8(addr, dst) RD(8, addr, dst, 0u, 3, g->romN[0])
+#define RD16(addr, dst) RD(16, addr, dst, 1u, 3, g->romN[0])
+#define RD32(addr, dst) RD(32, addr, dst, 3u, 6, g->romN[0] + g->romS[0])
+
+#define WR(bits, addr, val, mask, costE)                                                     \
+  do {                                                                                       \
+    const uint32_t a_ = (addr), v_ = (val);                                                  \
+    uint8_t* p_;                                                                             \
+    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                       \
+      p_ = g->iwW[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK);                    \
+      left -= 1;                                                                             \
+    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                \
+      p_ = g->ewW[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK);                    \
+      left -= (costE);                                                                       \
+    } else {                                                                                 \
+      SYNC_OUT();                                                                            \
+      mem_w##bits(g, a_ & ~(uint32_t)(mask), v_);                                            \
+      SYNC_IN();                                                                             \
+      break;                                                                                 \
+    }                                                                                        \
+    g->dirty ^= (ld##bits(p_) ^ (v_ & (uint32_t)(0xffffffffu >> (32 - bits)))) * sigOf(a_);  \
+    st##bits(p_, v_);                                                                        \
+  } while(0)
+#define st8(p, v) (*(uint8_t*)(p) = (uint8_t)(v))
+#define WR8(addr, val) WR(8, addr, val, 0u, 3)
+#define WR16(addr, val) WR(16, addr, val, 1u, 3)
+#define WR32(addr, val) WR(32, addr, val, 3u, 6)
+
+/* a jump: inside the page it only moves off, else the loop is left */
+#define JUMP(target)                           \
+  do {                                         \
+    const uint32_t t_ = (target) & ~1u;        \
+    left -= 2 * (int32_t)cost;                 \
+    if(t_ - base < len) {                      \
+      off = t_ - base;                         \
+    } else {                                   \
+      r[15] = t_ + 4;                          \
+      goto leave;                              \
+    }                                          \
+  } while(0)
+
+static void runThumb(Gba* g) {
+  Cpu* const c = &g->cpu;
+  uint32_t* const r = c->r;
+  {
+    const uint32_t pc = r[15] - 4;
+    if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
+  }
+  const uint8_t* const page = g->codePtr;
+  const uint32_t base = g->codeBase, len = g->codeLen, cost = g->codeCostT;
+  uint32_t off = r[15] - 4 - base;
+  int32_t left = (int32_t)(g->target - g->cycles);
+  /* PC as the instruction sees it (its address + 4), after off has moved past it */
+#define PC4 (base + off + 2)
+  while(left > 0 && off < len) {
+    const uint32_t op = ld16(page + off);
+    off += 2;
+    left -= (int32_t)cost;
 #ifdef GBA_STATS
     g->instrs++;
 #endif
-#ifdef GBA_TRACE
-    {   /* debugging: the first time the program counter falls below 0x40, say where it came from */
-      const uint32_t pc = c->r[15] - ((c->cpsr & T_BIT) ? 4 : 8);
-      if(pc < 0x18 && !g->stopAt) {
-        g->stopAt = 1;
-        gba_logf(g, "pc %08x after %08x %08x %08x %08x, r12=%u lr=%08x cpsr=%08x", (unsigned)pc, (unsigned)g->lastPc[0], (unsigned)g->lastPc[1],
-                 (unsigned)g->lastPc[2], (unsigned)g->lastPc[3], (unsigned)c->r[12], (unsigned)c->r[14], (unsigned)cpu_getCpsr(c));
+    switch(op >> 8) {
+      case 0x00 ... 0x07: {
+        uint32_t v = r[(op >> 3) & 7];
+        const uint32_t n = (op >> 6) & 31;
+        if(n) {
+          c->fc = (v >> (32 - n)) & 1;
+          v <<= n;
+        }
+        r[op & 7] = v;
+        setNZ(c, v);
+        continue;
       }
-      g->lastPc[3] = g->lastPc[2];
-      g->lastPc[2] = g->lastPc[1];
-      g->lastPc[1] = g->lastPc[0];
-      g->lastPc[0] = pc;
+      case 0x08 ... 0x0f: {
+        uint32_t v = r[(op >> 3) & 7];
+        const uint32_t n = (op >> 6) & 31;
+        if(n) {
+          c->fc = (v >> (n - 1)) & 1;
+          v >>= n;
+        } else {
+          c->fc = v >> 31;
+          v = 0;
+        }
+        r[op & 7] = v;
+        setNZ(c, v);
+        continue;
+      }
+      case 0x10 ... 0x17: {
+        uint32_t v = r[(op >> 3) & 7];
+        const uint32_t n = (op >> 6) & 31;
+        if(n) {
+          c->fc = (v >> (n - 1)) & 1;
+          v = (uint32_t)((int32_t)v >> n);
+        } else {
+          c->fc = v >> 31;
+          v = (uint32_t)((int32_t)v >> 31);
+        }
+        r[op & 7] = v;
+        setNZ(c, v);
+        continue;
+      }
+      case 0x18 ... 0x19: r[op & 7] = addFlags(c, r[(op >> 3) & 7], r[(op >> 6) & 7]); continue;
+      case 0x1a ... 0x1b: r[op & 7] = subFlags(c, r[(op >> 3) & 7], r[(op >> 6) & 7]); continue;
+      case 0x1c ... 0x1d: r[op & 7] = addFlags(c, r[(op >> 3) & 7], (op >> 6) & 7); continue;
+      case 0x1e ... 0x1f: r[op & 7] = subFlags(c, r[(op >> 3) & 7], (op >> 6) & 7); continue;
+      case 0x20 ... 0x27: {
+        const uint32_t v = op & 0xff;
+        r[(op >> 8) & 7] = v;
+        setNZ(c, v);
+        continue;
+      }
+      case 0x28 ... 0x2f: subFlags(c, r[(op >> 8) & 7], op & 0xff); continue;
+      case 0x30 ... 0x37: r[(op >> 8) & 7] = addFlags(c, r[(op >> 8) & 7], op & 0xff); continue;
+      case 0x38 ... 0x3f: r[(op >> 8) & 7] = subFlags(c, r[(op >> 8) & 7], op & 0xff); continue;
+      case 0x40 ... 0x43: {
+        uint32_t* const d = &r[op & 7];
+        const uint32_t s = r[(op >> 3) & 7];
+        uint32_t v;
+        switch((op >> 6) & 15) {
+          case 0: v = *d & s; break;
+          case 1: v = *d ^ s; break;
+          case 2: v = shiftReg(0, *d, s & 0xff, &c->fc); left--; break;
+          case 3: v = shiftReg(1, *d, s & 0xff, &c->fc); left--; break;
+          case 4: v = shiftReg(2, *d, s & 0xff, &c->fc); left--; break;
+          case 5: *d = adcFlags(c, *d, s); continue;
+          case 6: *d = sbcFlags(c, *d, s); continue;
+          case 7: v = shiftReg(3, *d, s & 0xff, &c->fc); left--; break;
+          case 8: setNZ(c, *d & s); continue;
+          case 9: *d = subFlags(c, 0, s); continue;
+          case 10: subFlags(c, *d, s); continue;
+          case 11: addFlags(c, *d, s); continue;
+          case 12: v = *d | s; break;
+          case 13: v = *d * s; left -= 2; break;
+          case 14: v = *d & ~s; break;
+          default: v = ~s; break;
+        }
+        *d = v;
+        setNZ(c, v);
+        continue;
+      }
+      case 0x44: {
+        const uint32_t rd = (op & 7) | ((op >> 4) & 8), rs = (op >> 3) & 15;
+        if(rd == 15 || rs == 15) goto slow;
+        r[rd] += r[rs];
+        continue;
+      }
+      case 0x45: {
+        const uint32_t rd = (op & 7) | ((op >> 4) & 8), rs = (op >> 3) & 15;
+        if(rd == 15 || rs == 15) goto slow;
+        subFlags(c, r[rd], r[rs]);
+        continue;
+      }
+      case 0x46: {
+        const uint32_t rd = (op & 7) | ((op >> 4) & 8), rs = (op >> 3) & 15;
+        if(rd == 15 || rs == 15) goto slow;
+        r[rd] = r[rs];
+        continue;
+      }
+      case 0x48 ... 0x4f: {
+        uint32_t v;
+        RD32((PC4 & ~2u) + (op & 0xff) * 4, v);
+        r[(op >> 8) & 7] = v;
+        left--;
+        continue;
+      }
+      case 0x50 ... 0x5f: {
+        const uint32_t a = r[(op >> 3) & 7] + r[(op >> 6) & 7];
+        uint32_t* const d = &r[op & 7];
+        uint32_t v;
+        switch((op >> 9) & 7) {
+          case 0: WR32(a, *d); continue;
+          case 1: WR16(a, *d); continue;
+          case 2: WR8(a, *d); continue;
+          case 3: RD8(a, v); *d = (uint32_t)(int8_t)v; left--; continue;
+          case 4: RD32(a, v); *d = v; left--; continue;
+          case 5: RD16(a, v); *d = v; left--; continue;
+          case 6: RD8(a, v); *d = v; left--; continue;
+          default:
+            if(a & 1) goto slow;
+            RD16(a, v);
+            *d = (uint32_t)(int16_t)v;
+            left--;
+            continue;
+        }
+      }
+      case 0x60 ... 0x67: WR32(r[(op >> 3) & 7] + ((op >> 6) & 31) * 4, r[op & 7]); continue;
+      case 0x68 ... 0x6f: {
+        uint32_t v;
+        RD32(r[(op >> 3) & 7] + ((op >> 6) & 31) * 4, v);
+        r[op & 7] = v;
+        left--;
+        continue;
+      }
+      case 0x70 ... 0x77: WR8(r[(op >> 3) & 7] + ((op >> 6) & 31), r[op & 7]); continue;
+      case 0x78 ... 0x7f: {
+        uint32_t v;
+        RD8(r[(op >> 3) & 7] + ((op >> 6) & 31), v);
+        r[op & 7] = v;
+        left--;
+        continue;
+      }
+      case 0x80 ... 0x87: WR16(r[(op >> 3) & 7] + ((op >> 6) & 31) * 2, r[op & 7]); continue;
+      case 0x88 ... 0x8f: {
+        uint32_t v;
+        RD16(r[(op >> 3) & 7] + ((op >> 6) & 31) * 2, v);
+        r[op & 7] = v;
+        left--;
+        continue;
+      }
+      case 0x90 ... 0x97: WR32(r[13] + (op & 0xff) * 4, r[(op >> 8) & 7]); continue;
+      case 0x98 ... 0x9f: {
+        uint32_t v;
+        RD32(r[13] + (op & 0xff) * 4, v);
+        r[(op >> 8) & 7] = v;
+        left--;
+        continue;
+      }
+      case 0xa0 ... 0xa7: r[(op >> 8) & 7] = (PC4 & ~2u) + (op & 0xff) * 4; continue;
+      case 0xa8 ... 0xaf: r[(op >> 8) & 7] = r[13] + (op & 0xff) * 4; continue;
+      case 0xb0:
+        if(op & 0x80) r[13] -= (op & 0x7f) * 4;
+        else r[13] += (op & 0x7f) * 4;
+        continue;
+      case 0xb4:
+      case 0xb5: {   /* PUSH, on a stack in one page of the fast RAM */
+        const uint32_t n = (uint32_t)__builtin_popcount(op & 0x1ff);
+        uint32_t a = r[13] - 4 * n;
+        if((a & 0xff000003u) != 0x03000000u || (a & PG_MASK) + 4 * n > PG_SIZE) goto slow;
+        r[13] = a;
+        uint8_t* p = g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        uint32_t list = (op & 0xff) | ((op & 0x100) << 6);   /* bit 14: lr */
+        while(list) {
+          const uint32_t v = r[__builtin_ctz(list)];
+          list &= list - 1;
+          g->dirty ^= (ld32(p) ^ v) * sigOf(a);
+          st32(p, v);
+          p += 4;
+          a += 4;
+        }
+        left -= (int32_t)n;
+        continue;
+      }
+      case 0xbc: {   /* POP without pc */
+        const uint32_t n = (uint32_t)__builtin_popcount(op & 0xff);
+        const uint32_t a = r[13];
+        if((a & 0xff000003u) != 0x03000000u || (a & PG_MASK) + 4 * n > PG_SIZE) goto slow;
+        const uint8_t* p = g->iwR[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        uint32_t list = op & 0xff;
+        while(list) {
+          r[__builtin_ctz(list)] = ld32(p);
+          list &= list - 1;
+          p += 4;
+        }
+        r[13] = a + 4 * n;
+        left -= (int32_t)n + 1;
+        continue;
+      }
+      case 0xd0 ... 0xdd:
+        if(cond(c, (op >> 8) & 15)) {
+          if((op & 0x80) && idleHook(g, PC4)) {
+            g->idleCycles += (uint32_t)left;
+            left = 0;
+          }
+          JUMP(PC4 + (uint32_t)((int32_t)(int8_t)op * 2));
+        }
+        continue;
+      case 0xe0 ... 0xe7:
+        if((op & 0x400) && idleHook(g, PC4)) {
+          g->idleCycles += (uint32_t)left;
+          left = 0;
+        }
+        JUMP(PC4 + (uint32_t)((int32_t)(op << 21) >> 20));
+        continue;
+      case 0xf0 ... 0xf7: r[14] = PC4 + (uint32_t)((int32_t)(op << 21) >> 9); continue;
+      case 0xf8 ... 0xff: {
+        const uint32_t t = r[14] + ((op & 0x7ff) << 1);
+        r[14] = (base + off) | 1;
+        JUMP(t);
+        continue;
+      }
+      default:
+      slow:
+        r[15] = PC4;
+        SYNC_OUT();
+        thumbExec(g, op);
+        r[15] += 2;
+        SYNC_IN();
+        if(!(c->cpsr & T_BIT) || r[15] - 4 - base >= len) return;
+        off = r[15] - 4 - base;
+        continue;
     }
+  }
+  r[15] = base + off + 4;
+leave:
+  SYNC_OUT();
+#undef PC4
+}
+
+static void runArm(Gba* g) {
+  Cpu* const c = &g->cpu;
+  uint32_t* const r = c->r;
+  {
+    const uint32_t pc = r[15] - 8;
+    if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
+  }
+  const uint8_t* const page = g->codePtr;
+  const uint32_t base = g->codeBase, len = g->codeLen, cost = g->codeCostA;
+  uint32_t off = r[15] - 8 - base;
+  int32_t left = (int32_t)(g->target - g->cycles);
+  while(left > 0 && off < len) {
+    const uint32_t op = ld32(page + off);
+    off += 4;
+    left -= (int32_t)cost;
+#ifdef GBA_STATS
+    g->instrs++;
 #endif
-    if(c->cpsr & T_BIT) {
-      const uint32_t a = c->r[15] - 4;
-      uint32_t off = a - g->codeBase;
-      if(off >= g->codeLen) {
-        mem_codePage(g, a);
-        off = a - g->codeBase;
-      }
-      const uint32_t op = ld16(g->codePtr + off);
-      g->cycles += g->codeCostT;
-      thumbExec(g, op);
-      c->r[15] += 2;
-    } else {
-      const uint32_t a = c->r[15] - 8;
-      uint32_t off = a - g->codeBase;
-      if(off >= g->codeLen) {
-        mem_codePage(g, a);
-        off = a - g->codeBase;
-      }
-      const uint32_t op = ld32(g->codePtr + off);
-      g->cycles += g->codeCostA;
-      if(op >> 28 == 14 || cond(c, op >> 28)) armExec(g, op);
-      c->r[15] += 4;
+    if(op >> 28 != 14 && !cond(c, op >> 28)) continue;
+    const uint32_t pc8 = base + off + 4;   /* the instruction's address + 8 */
+    r[15] = pc8;
+    SYNC_OUT();
+    armExec(g, op);
+    SYNC_IN();
+    if(r[15] != pc8 || (c->cpsr & T_BIT)) {   /* it jumped */
+      r[15] += 4;
+      if((c->cpsr & T_BIT) || r[15] - 8 - base >= len) return;
+      off = r[15] - 8 - base;
     }
+  }
+  r[15] = base + off + 8;
+  SYNC_OUT();
+}
+
+void cpu_run(Gba* g) {
+  while((int32_t)(g->target - g->cycles) > 0) {
+    if(g->cpu.cpsr & T_BIT) runThumb(g);
+    else runArm(g);
   }
 }

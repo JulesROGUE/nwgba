@@ -90,8 +90,12 @@ static void run(uint32_t drawEvery, const char* label) {
   gba_init(&g, &host, bench_rom, bench_rom_size, ram, save);
   g.saveType = GBA_SAVE_FLASH;
   uint64_t t0 = 0, worst = 0;
+  uint32_t i0 = 0;
   for(uint32_t f = 0; f < BENCH_SKIP + BENCH_FRAMES; f++) {
-    if(f == BENCH_SKIP) t0 = ticks();
+    if(f == BENCH_SKIP) {
+      t0 = ticks();
+      i0 = g.instrs;
+    }
     g.keys = scriptKeys(BENCH_KEYS, f);
     g.render = f >= BENCH_SKIP && drawEvery && f % drawEvery == 0;
     const uint64_t a = ticks();
@@ -106,8 +110,8 @@ static void run(uint32_t drawEvery, const char* label) {
   outNum(ld32(bench_rom));
   out(", pc ");
   outNum(g.cpu.r[15]);
-  out(", guest instructions in all ");
-  outNum(g.instrs);
+  out(", game instructions per frame ");
+  outNum((g.instrs - i0) / BENCH_FRAMES);
   out("\n");
   out(label);
   out(": ");

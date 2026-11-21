@@ -389,7 +389,6 @@ uint32_t mem_r32(Gba* g, uint32_t a) {
 /* -------------------------------------------------------------- writes -- */
 
 /* stores that note what they change (see Gba.dirty) */
-static inline uint32_t sigOf(uint32_t a) { return (a * 0x9e3779b1u) | 1; }
 static inline void put8(Gba* g, uint32_t a, uint8_t* p, uint32_t v) {
   g->dirty ^= (*p ^ (v & 0xff)) * sigOf(a);
   *p = (uint8_t)v;

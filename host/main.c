@@ -79,7 +79,6 @@ int main(int argc, char** argv) {
     else if(!memcmp(rom + i, "EEPROM_V", 8)) g.saveType = GBA_SAVE_EEPROM;
   }
   uint64_t instrs = 0, busiest = 0, idle = 0;
-  if(getenv("STOPAT")) g.stopAt = (uint32_t)strtoul(getenv("STOPAT"), NULL, 16);
   for(int i = 0; i < frames; i++) {
     g.keys = scriptKeys(keys, (uint32_t)i);
     g.instrs = 0;

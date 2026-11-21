@@ -119,10 +119,11 @@ struct Gba {
   uint32_t dirty;                 /* signature of what memory writes changed since that jump: each
                                      write adds (old ^ new) x a number made from its address, so
                                      writes that put things back (push, pop, push again) cancel out */
-  uint8_t busy;                   /* something else happened since: I/O written, clock read, interrupt, BIOS call */
+  uint8_t busy;                   /* something else happened since: I/O written, clock read, BIOS call */
+  uint8_t irqDepth, irqBusy;      /* interrupt handlers run aside: only what they change in memory counts
+                                     against the loop they interrupt (busy is put back when they return) */
   uint32_t idleCycles;            /* cycles skipped (statistics) */
   uint32_t instrs;                /* instructions run (statistics) */
-  uint32_t stopAt, lastPc[8];     /* debugging (PC builds): trace of jumps into low memory */
   GbaHost host;
 };
 
@@ -166,6 +167,9 @@ void ppu_line(Gba* g, int y, uint16_t* out);
 /* runs a BIOS function; true if the instruction must run again (waiting) */
 bool bios_swi(Gba* g, uint32_t n);
 extern const uint8_t bios_stub[64];
+
+/* what a write at address a weighs in Gba.dirty */
+static inline uint32_t sigOf(uint32_t a) { return (a * 0x9e3779b1u) | 1; }
 
 static inline uint32_t ld16(const uint8_t* p) {
   uint16_t v;

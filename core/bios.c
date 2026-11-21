@@ -85,6 +85,30 @@ static void divide(Gba* g, int32_t num, int32_t den) {
 
 /* -------------------------------------------------------------- copies -- */
 
+/* Nothing here plays sound. The sound driver most games use ("MP2K") mixes
+ * its channels with a routine it copies into RAM; when that copy is seen,
+ * the first instruction of the routine's sample loop is made a jump to the
+ * loop's end. The rest of the driver (sequencer, envelopes) runs as usual. */
+static void skipMixer(Gba* g, uint32_t src, uint32_t dst, uint32_t bytes) {
+  if(src < 0x08000000u || (dst >> 24) < 2 || (dst >> 24) > 3 || bytes < 0x200) return;
+  const uint32_t keep = g->cycles, end = dst + bytes;
+  for(uint32_t a = dst; a + 16 <= end; a += 4) {
+    if(mem_r32(g, a) != 0xe58d8000u) continue;                       /* str r8, [sp] */
+    if((mem_r32(g, a + 4) & 0xfffff000u) != 0xe5d4a000u) continue;   /* ldrb r10, [r4, #..] */
+    if((mem_r32(g, a + 8) & 0xfffff000u) != 0xe5d4b000u) continue;   /* ldrb r11, [r4, #..] */
+    if(mem_r32(g, a + 12) != 0xe1a0a80au) continue;                  /* lsl r10, r10, #16 */
+    for(uint32_t e = a + 16; e + 12 <= end; e += 4) {
+      /* ldr r8, [sp]; add r0, pc, #1; bx r0 */
+      if(mem_r32(g, e) != 0xe59d8000u || mem_r32(g, e + 4) != 0xe28f0001u || mem_r32(g, e + 8) != 0xe12fff10u) continue;
+      mem_w32(g, a, 0xea000000u | (((e + 4 - (a + 8)) >> 2) & 0x00ffffffu));
+      gba_logf(g, "sound mixer at %08x: sample loop skipped", (unsigned)a);
+      break;
+    }
+    break;
+  }
+  g->cycles = keep;
+}
+
 static void cpuSet(Gba* g) {
   uint32_t* r = g->cpu.r;
   uint32_t src = r[0], dst = r[1], n = r[2] & 0x1fffff;
@@ -92,11 +116,13 @@ static void cpuSet(Gba* g) {
   if(r[2] & (1u << 26)) {
     src &= ~3u;
     dst &= ~3u;
+    const uint32_t src0 = src, dst0 = dst, bytes = n * 4;
     const uint32_t v = fill ? mem_r32(g, src) : 0;
     for(; n; n--, dst += 4) {
       mem_w32(g, dst, fill ? v : mem_r32(g, src));
       if(!fill) src += 4;
     }
+    if(!fill) skipMixer(g, src0, dst0, bytes);
   } else {
     src &= ~1u;
     dst &= ~1u;
@@ -112,11 +138,13 @@ static void cpuFastSet(Gba* g) {
   uint32_t* r = g->cpu.r;
   uint32_t src = r[0] & ~3u, dst = r[1] & ~3u, n = ((r[2] & 0x1fffff) + 7) & ~7u;
   const bool fill = r[2] & (1u << 24);
+  const uint32_t src0 = src, dst0 = dst, bytes = n * 4;
   const uint32_t v = fill ? mem_r32(g, src) : 0;
   for(; n; n--, dst += 4) {
     mem_w32(g, dst, fill ? v : mem_r32(g, src));
     if(!fill) src += 4;
   }
+  if(!fill) skipMixer(g, src0, dst0, bytes);
 }
 
 /* ------------------------------------------------------- decompression -- */
