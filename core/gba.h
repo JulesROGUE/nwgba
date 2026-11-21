@@ -86,6 +86,8 @@ typedef struct Timer {
 /* interrupt handlers seen to do nothing (irqm.c) */
 #define IRQM_SLOTS 6
 #define ROM_WINDOWS 4
+#define ROM_CACHE 128           /* a power of two */
+#define ROMC_LATELY 0x8000u
 #define IRQM_READS 16
 typedef struct IrqMemo {
   uint16_t source;              /* the interrupts taken together (IE & IF); 0: unused */
@@ -185,6 +187,12 @@ struct Gba {
   uint8_t handTurns;
   uint8_t hard[(EWRAM_PAGES + VRAM_PAGES + 7) / 8];   /* pages that did not pack: not tried again for a while */
   uint32_t packs, unpacks, wakes; /* since the start */
+  /* pages of ROM the pack holds deflated, inflated into frames while they serve */
+  uint16_t romcPage[ROM_CACHE];   /* which page of the ROM (0xffff: none) */
+  uint16_t romcFrame[ROM_CACHE];  /* its frame; ROMC_LATELY: looked up since the hand last passed */
+  uint32_t zipGroup;              /* the group zipBuf holds (~0: none) */
+  uint32_t inflates, romFaults;   /* since the start */
+  uint8_t zipBuf[PACK_GROUP];     /* the group inflated last: the game often goes on to the next page */
   uint32_t leftOutReads;          /* reads of ROM pages the pack left out */
   Pack pack;
   struct RomWindow {              /* stretches of ROM read as data before the two at hand */

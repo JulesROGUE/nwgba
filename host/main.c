@@ -113,6 +113,7 @@ int main(int argc, char** argv) {
   }
   int frames = 600, every = 60, hashEvery = 0, ramKb = 0;
   bool report = false;
+  const char* verify = NULL;   /* a file the ROM, as read through the pack, must be equal to */
   const char* dump = NULL;
   const char* keys = NULL;
   for(int i = 2; i < argc; i++) {
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
     else if(!strcmp(argv[i], "--hash") && i + 1 < argc) hashEvery = atoi(argv[++i]);   /* prints a checksum of the picture every N frames */
     else if(!strcmp(argv[i], "--ram") && i + 1 < argc) ramKb = atoi(argv[++i]);
     else if(!strcmp(argv[i], "--mem-report")) report = true;
+    else if(!strcmp(argv[i], "--verify") && i + 1 < argc) verify = argv[++i];
   }
   FILE* f = fopen(argv[1], "rb");
   if(!f) {
@@ -132,7 +134,7 @@ int main(int argc, char** argv) {
   fseek(f, 0, SEEK_END);
   const long n = ftell(f);
   fseek(f, 0, SEEK_SET);
-  const uint32_t size = ((uint32_t)n + PG_MASK) & ~(uint32_t)PG_MASK;
+  const uint32_t size = ((uint32_t)n + PACK_GROUP - 1) & ~(uint32_t)(PACK_GROUP - 1);
   uint8_t* file = calloc(1, size + 4);
   if(fread(file, 1, (size_t)n, f) != (size_t)n) return 1;
   fclose(f);
@@ -145,7 +147,7 @@ int main(int argc, char** argv) {
     }
     pack_second(&pack, file + pack.size1);
   } else {
-    pack_plain(&pack, file, size, malloc(size / PG_SIZE * 2));
+    pack_plain(&pack, file, size, malloc(size / PACK_GROUP * 2));
     for(uint32_t i = 0; i + 8 < size; i += 4) {   /* the kind of save memory, from the name of the library the game was built with */
       if(!memcmp(file + i, "FLASH1M_V", 9)) pack.saveType = GBA_SAVE_FLASH1M;
       else if(!memcmp(file + i, "FLASH", 5) && pack.saveType != GBA_SAVE_FLASH1M) pack.saveType = GBA_SAVE_FLASH;
@@ -165,6 +167,22 @@ int main(int argc, char** argv) {
   uint8_t* save = calloc(1, SAVE_BYTES(255));
   const GbaHost host = {&h, hostLine, hostLog};
   gba_init(&g, &host, &pack, mem, memBytes, save, SAVE_BYTES(255));
+  if(verify) {   /* the whole ROM, read through the core as the game would, against a reference */
+    FILE* vf = fopen(verify, "rb");
+    if(!vf) {
+      fprintf(stderr, "cannot read %s\n", verify);
+      return 1;
+    }
+    uint32_t wrong = 0, first = 0, at = 0;
+    for(int c; (c = fgetc(vf)) != EOF && at < pack.romSize; at++) {
+      if((int)mem_r8(&g, 0x08000000u + at) != c && !wrong++) first = at;
+    }
+    fclose(vf);
+    fprintf(stderr, "%u bytes of ROM read through the pack: %u wrong", (unsigned)at, (unsigned)wrong);
+    if(wrong) fprintf(stderr, " (the first at %x)", (unsigned)first);
+    fprintf(stderr, "; %u groups inflated, %u pages brought in\n", (unsigned)g.inflates, (unsigned)g.romFaults);
+    return wrong != 0;
+  }
   uint64_t instrs = 0, busiest = 0, idle = 0;
   for(int i = 0; i < frames; i++) {
     g.keys = scriptKeys(keys, (uint32_t)i);
@@ -200,6 +218,7 @@ int main(int argc, char** argv) {
   if(g.packs || g.wakes)
     fprintf(stderr, "; pages packed %u times and unpacked %u times (%u packed at the end, in %u frames), woken %u times",
             (unsigned)g.packs, (unsigned)g.unpacks, (unsigned)g.nPacked, (unsigned)g.nSlabs, (unsigned)g.wakes);
+  if(g.inflates) fprintf(stderr, "; %u groups of ROM inflated for %u pages brought in", (unsigned)g.inflates, (unsigned)g.romFaults);
   if(g.outOfMemory) fprintf(stderr, "; OUT OF MEMORY");
   fprintf(stderr, "; interrupts: %u handled, %u known to do nothing", (unsigned)g.irqTaken, (unsigned)g.irqSkipped);
   if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);

@@ -29,8 +29,6 @@ Mais l'essentiel de ce que le jeu met en mémoire ne change plus une fois charg�
 
 Pour Advance Wars, du démarrage à la première bataille : 61 Ko de vraie mémoire au lieu de 195.
 
-La place dans la flash se gagne de la même façon : le pack ne garde ni les échantillons de son (personne ne les jouera), ni les blocs compressés d'origine (leur version décompressée les remplace). La ROM de 4 Mo d'Advance Wars donne un pack de 4,6 Mo, en deux parties.
-
 Et quand la vraie mémoire vient quand même à manquer, **ce qui ne sert pas sur le moment est rangé en petit** (« le coin serré », dans `core/mem.c`). Un jeu garde bien plus de mémoire qu'il n'en touche à un instant donné : des tampons remplis une fois, des images préparées d'avance, des tables presque vides. Une aiguille fait le tour des pages ; celle qu'elle trouve éveillée est endormie (elle garde son contenu, mais le premier accès passera par le chemin lent, qui la réveille) ; celle qu'elle retrouve endormie au tour suivant n'a pas servi entre-temps, et celle-là est compressée (les zéros, et les octets qui répètent ceux d'un peu avant, s'écrivent court) et rangée à plusieurs par cadre de mémoire. Elle est décompressée au premier accès. Rien n'est compté sur les chemins rapides, et un jeu qui a assez de mémoire ne voit rien de tout cela.
 
 | Depuis le démarrage (12 000 images) | vraie mémoire demandée | donnée | pages compressées, puis décompressées |
@@ -40,7 +38,14 @@ Et quand la vraie mémoire vient quand même à manquer, **ce qui ne sert pas su
 | Golden Sun (3000 images) | plus de 200 Ko | 94 Ko | 368, puis 291 |
 | Advance Wars, jusqu'à la bataille | 61 Ko | 37 Ko | 501, puis 363 |
 
-Les images sont les mêmes, au pixel près, qu'avec toute la mémoire voulue. Ce que ça ne sait pas faire : un jeu qui *touche* à chaque image plus de mémoire qu'il n'y en a passe son temps à compresser, et s'arrête (« Mémoire pleine ») si rien ne se compresse. Et il reste la place dans la flash : un jeu de plus de 4 Mo n'y tient pas tel quel.
+Les images sont les mêmes, au pixel près, qu'avec toute la mémoire voulue. Ce que ça ne sait pas faire : un jeu qui *touche* à chaque image plus de mémoire qu'il n'y en a passe son temps à compresser, et s'arrête (« Mémoire pleine ») si rien ne se compresse.
+
+**La place dans la flash** se gagne de deux façons, et `gba2nw` choisit la première qui tient dans les 4,8 Mo de la calculatrice :
+
+- *pack prêt* : les blocs compressés du jeu sont rangés déjà décompressés (c'est ce qui épargne la vraie mémoire, voir plus haut), et leurs versions compressées sont retirées. Plus gros que la ROM : 4,4 Mo pour les 4 Mo d'Advance Wars ;
+- *pack compressé* : la ROM est coupée en groupes de 1 Ko ; ce qui est du programme reste tel quel (il s'exécute sur place), tout le reste est compressé groupe par groupe (deflate, celui de zlib), et décompressé dans un cadre de mémoire quand le jeu le lit (`core/inflate.c`, et « romPage » dans `core/mem.c`). Ces cadres se reprennent sans rien coûter : le pack a toujours l'original. Les 16 Mo de Pokémon Rubis (8,5 Mo sans le remplissage) donnent un pack de 4,1 Mo.
+
+Dans les deux cas les échantillons de son ne sont pas gardés (personne ne les jouera) : 2 Mo dans Rubis, cris compris.
 
 ### La vitesse
 

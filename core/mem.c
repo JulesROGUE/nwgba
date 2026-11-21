@@ -49,23 +49,26 @@ uint32_t mem_cost(const Gba* g, uint32_t a, bool wide) {
 
 /* A page of the ROM that the pack does not store: what stands for it */
 static const uint8_t* romOther(Gba* g, uint32_t page) {
-  const uint32_t k = pack_u16(g->pack.pageTable + 2 * page);
+  const uint32_t k = pack_group(&g->pack, page);
   if(k == PACK_ONES) return kOnesPage;
   if(k == PACK_LEFT_OUT) g->leftOutReads++;
   return kZeroPage;
 }
+
+static const uint8_t* romPage(Gba* g, uint32_t page);   /* a page the pack holds deflated: below, with the frames */
 
 /* n bytes (1 to 4) of ROM at off, in one piece: where they are, or NULL
  * (past the end, or across two pieces).
  *
  * The stretch of ROM last read is at hand (romPtr), and the one before
  * (games go back and forth between two); four older ones are kept behind.
- * A new one comes from the pack's table of pages: the page asked for and up
- * to eight stored right before and after it. (Looking the whole stretch up
+ * A new one comes from the pack's table of groups: the group asked for and
+ * up to two stored right before and after it; or, for a group the pack
+ * holds deflated, the one page asked for, inflated into a frame. (Looking the whole stretch up
  * in the pack's list is a search through a table in flash, and a game with
  * many holes in its ROM that reads from three places in turn did it eight
  * hundred times a frame.) */
-#define ROM_REACH 8u
+#define ROM_REACH 2u
 static const uint8_t* romSlow(Gba* g, uint32_t off, uint32_t n) {
   if(off >= g->romSize) return NULL;
   const uint8_t* ptr;
@@ -79,20 +82,26 @@ static const uint8_t* romSlow(Gba* g, uint32_t off, uint32_t n) {
     while(i < ROM_WINDOWS && off - g->romW[i].base >= g->romW[i].len) i++;
     if(i == ROM_WINDOWS) {
       const Pack* p = &g->pack;
-      const uint32_t page = off >> PG_SHIFT, k = pack_u16(p->pageTable + 2 * page);
+      const uint32_t page = off >> PG_SHIFT, k = pack_group(p, page);
       if(k >= PACK_ONES) return (off & PG_MASK) + n <= PG_SIZE ? romOther(g, page) + (off & PG_MASK) : NULL;
-      const uint8_t* const at = pack_block(p, k);
-      const uint32_t pages = g->romSize >> PG_SHIFT;
-      uint32_t before = 0, after = 1;
-      while(before < ROM_REACH && before < page && before < k && pack_u16(p->pageTable + 2 * (page - before - 1)) == k - before - 1 &&
-            pack_block(p, k - before - 1) == at - ((size_t)(before + 1) << PG_SHIFT))
-        before++;
-      while(after <= ROM_REACH && page + after < pages && pack_u16(p->pageTable + 2 * (page + after)) == k + after &&
-            pack_block(p, k + after) == at + ((size_t)after << PG_SHIFT))
-        after++;
-      ptr = at - ((size_t)before << PG_SHIFT);
-      base = (page - before) << PG_SHIFT;
-      len = ((before + after) << PG_SHIFT) - 3;
+      if(k >= PACK_ZIP) {   /* deflated in the pack: the page, inflated into a frame */
+        ptr = romPage(g, page);
+        base = page << PG_SHIFT;
+        len = PG_SIZE - 3;
+      } else {              /* plain: its group, and up to two groups stored right before and after */
+        const uint32_t group = page >> 2, groups = g->romSize >> 10;
+        const uint8_t* const at = pack_block(p, k * 4);
+        uint32_t before = 0, after = 1;
+        while(before < ROM_REACH && before < group && before < k && pack_u16(p->groupTable + 2 * (group - before - 1)) == k - before - 1 &&
+              pack_block(p, (k - before - 1) * 4) == at - ((size_t)(before + 1) << 10))
+          before++;
+        while(after <= ROM_REACH && group + after < groups && pack_u16(p->groupTable + 2 * (group + after)) == k + after &&
+              pack_block(p, (k + after) * 4) == at + ((size_t)after << 10))
+          after++;
+        ptr = at - ((size_t)before << 10);
+        base = (group - before) << 10;
+        len = ((before + after) << 10) - 3;
+      }
       i = g->romWNext;   /* the oldest of the four makes room */
       g->romWNext = (uint8_t)((i + 1) % ROM_WINDOWS);
     } else {
@@ -152,14 +161,20 @@ void mem_codePage(Gba* g, uint32_t a) {
       g->codeCostT = g->romS[k];
       g->codeCostA = 2u * g->romS[k];
       g->codeCostL = (uint32_t)g->romN[k] + g->romS[k];
+      const uint32_t how = pack_group(&g->pack, off >> PG_SHIFT);
       uint32_t first, pages;
-      const uint8_t* run = pack_run(&g->pack, off >> PG_SHIFT, &first, &pages);
-      if(run) {
+      const uint8_t* run;
+      if(how >= PACK_ONES) {
+        g->codePtr = romOther(g, off >> PG_SHIFT);
+      } else if(how >= PACK_ZIP) {
+        /* code in a group taken for data when the pack was made: run from its frame, a page at a time */
+        g->codePtr = romPage(g, off >> PG_SHIFT);
+      } else if((run = pack_run(&g->pack, off >> PG_SHIFT, &first, &pages)) != NULL) {
         g->codePtr = run;
         g->codeBase = (a & 0xfe000000u) + (first << PG_SHIFT);
         g->codeLen = pages << PG_SHIFT;
       } else {
-        g->codePtr = romOther(g, off >> PG_SHIFT);
+        g->codePtr = kZeroPage;
       }
       return;
     }
@@ -618,14 +633,42 @@ static void cornerFree(Gba* g, const uint8_t* corner) {
   frameGive(g, s);
 }
 
+/* is a stretch of ROM at hand in this frame? */
+static bool romHeld(const Gba* g, const uint8_t* f) {
+  if((g->romLen && g->romPtr == f) || (g->rom2Len && g->rom2Ptr == f)) return true;
+  for(int i = 0; i < ROM_WINDOWS; i++)
+    if(g->romW[i].len && g->romW[i].ptr == f) return true;
+  return false;
+}
+static void romLetGo(Gba* g, const uint8_t* f) {
+  if(g->romPtr == f) g->romLen = 0;
+  if(g->rom2Ptr == f) g->rom2Len = 0;
+  for(int i = 0; i < ROM_WINDOWS; i++)
+    if(g->romW[i].ptr == f) g->romW[i].len = 0;
+}
+
 /* The hand goes on, over at most n pages. Pages awake are put to sleep. With
  * need: pages still asleep are packed (or found to be all zeros), until a
  * frame is free. */
 static void sweep(Gba* g, uint32_t n, bool need) {
   while(n--) {
     const uint32_t i = g->hand;
-    g->hand = (uint16_t)(i + 1 < ALL_PAGES ? i + 1 : 0);
+    g->hand = (uint16_t)(i + 1 < ALL_PAGES + ROM_CACHE ? i + 1 : 0);
     if(!g->hand && (++g->handTurns & 3) == 0) memset(g->hard, 0, sizeof g->hard);   /* now and then, another chance */
+    if(i >= ALL_PAGES) {   /* a page of ROM inflated into a frame: not looked up lately, it just goes */
+      const uint32_t k = i - ALL_PAGES;
+      if(g->romcPage[k] == 0xffff) continue;
+      const uint8_t* const f = g->frames + ((uint32_t)(g->romcFrame[k] & ~ROMC_LATELY) << PG_SHIFT);
+      if(f == g->codePtr || romHeld(g, f)) continue;
+      if(g->romcFrame[k] & ROMC_LATELY) {
+        g->romcFrame[k] &= (uint16_t)~ROMC_LATELY;
+      } else if(need) {
+        g->romcPage[k] = 0xffff;
+        frameGive(g, f);
+        return;
+      }
+      continue;
+    }
     const bool video = i >= EWRAM_PAGES;
     const uint8_t** const slot = video ? &g->vrR[i - EWRAM_PAGES] : &g->ewR[i];
     uint8_t* const state = video ? &g->vrS[i - EWRAM_PAGES] : &g->ewS[i];
@@ -675,7 +718,7 @@ static void sweep(Gba* g, uint32_t n, bool need) {
 static uint8_t* frameGet(Gba* g) {
   if(g->nFree <= AGE_BELOW) {
     if(g->nFree) sweep(g, AGE_STEP, false);
-    else sweep(g, 2 * ALL_PAGES, true);   /* twice round at most: once to put to sleep, once to pack */
+    else sweep(g, 2 * (ALL_PAGES + ROM_CACHE), true);   /* twice round at most: once to put to sleep, once to pack */
   }
   uint8_t* const f = frameTake(g);
   if(f) return f;
@@ -701,6 +744,57 @@ static uint8_t* wake(Gba* g, const uint8_t** slot, uint8_t* state) {
   *state = PG_RAM;
   g->nPacked--;
   g->unpacks++;
+  return f;
+}
+
+/* A page of ROM that the pack holds deflated, inflated into a frame of its
+ * own (kept in a small table, four places a page may be in). The frame
+ * stays while the page is looked up now and then; the hand takes it back
+ * otherwise, and it costs nothing: the pack still has it. */
+static const uint8_t* romPage(Gba* g, uint32_t page) {
+  const uint32_t h = (page * 0x9e3779b1u) >> 25;
+  int spare = -1, old = -1;
+  for(uint32_t j = 0; j < 4; j++) {
+    const uint32_t k = (h + j) & (ROM_CACHE - 1);
+    if(g->romcPage[k] == page) {
+      g->romcFrame[k] |= ROMC_LATELY;
+      return g->frames + ((uint32_t)(g->romcFrame[k] & ~ROMC_LATELY) << PG_SHIFT);
+    }
+    if(g->romcPage[k] == 0xffff) {
+      if(spare < 0) spare = (int)k;
+    } else if(old < 0 || !(g->romcFrame[k] & ROMC_LATELY)) {
+      const uint8_t* const f = g->frames + ((uint32_t)(g->romcFrame[k] & ~ROMC_LATELY) << PG_SHIFT);
+      if(f != g->codePtr) old = (int)k;
+    }
+  }
+  g->romFaults++;
+  /* the group it is in: the one inflated last, or to inflate now */
+  const uint32_t group = page >> 2;
+  if(g->zipGroup != group) {
+    const uint32_t z = pack_group(&g->pack, page) - PACK_ZIP;
+    g->zipGroup = ~0u;
+    if(pack_inflate(pack_zip(&g->pack, z), g->zipBuf, PACK_GROUP) != (int32_t)PACK_GROUP) {
+      gba_logf(g, "pack: group %u does not inflate", (unsigned)group);
+      memset(g->zipBuf, 0, PACK_GROUP);
+    }
+    g->zipGroup = group;
+    g->inflates++;
+  }
+  uint8_t* f;
+  if(spare < 0 && old >= 0) {   /* the four places are taken: one page gives its frame */
+    spare = old;
+    f = g->frames + ((uint32_t)(g->romcFrame[spare] & ~ROMC_LATELY) << PG_SHIFT);
+    romLetGo(g, f);
+  } else if(spare < 0) {
+    return g->zipBuf + ((page & 3) << PG_SHIFT);   /* (all four hold code that runs: cannot be) */
+  } else {
+    f = frameGet(g);
+    if(g->outOfMemory) return g->zipBuf + ((page & 3) << PG_SHIFT);
+    /* (taking a frame may have filled or emptied places of the table, but not this one: it was free) */
+  }
+  memcpy(f, g->zipBuf + ((page & 3) << PG_SHIFT), PG_SIZE);
+  g->romcPage[spare] = (uint16_t)page;
+  g->romcFrame[spare] = (uint16_t)((uint32_t)(f - g->frames) >> PG_SHIFT) | ROMC_LATELY;
   return f;
 }
 
@@ -1025,10 +1119,16 @@ static const uint8_t* peek(Gba* g, uint32_t a, uint32_t n, bool fixed) {
     case 8: case 9: case 10: case 11: case 12: case 13: {
       const uint32_t off = a & 0x01ffffffu;
       if(off >= g->romSize) return NULL;
+      const uint32_t k = pack_group(&g->pack, off >> PG_SHIFT);
+      if(k >= PACK_ZIP) {
+        if((off & PG_MASK) + n > PG_SIZE) return NULL;
+        if(k >= PACK_ONES) return romOther(g, off >> PG_SHIFT) + (off & PG_MASK);
+        /* deflated in the pack: its frame may go at any time, nothing can be pointed at it for good */
+        return fixed ? NULL : romPage(g, off >> PG_SHIFT) + (off & PG_MASK);
+      }
       uint32_t first, pages;
       const uint8_t* run = pack_run(&g->pack, off >> PG_SHIFT, &first, &pages);
-      if(run) return off - (first << PG_SHIFT) + n <= pages << PG_SHIFT ? run + (off - (first << PG_SHIFT)) : NULL;
-      return (off & PG_MASK) + n <= PG_SIZE ? romOther(g, off >> PG_SHIFT) + (off & PG_MASK) : NULL;
+      return run && off - (first << PG_SHIFT) + n <= pages << PG_SHIFT ? run + (off - (first << PG_SHIFT)) : NULL;
     }
     default: return NULL;
   }
@@ -1203,6 +1303,9 @@ void mem_reset(Gba* g) {
   g->nPacked = g->nSlabs = 0;
   memset(g->hard, 0, sizeof g->hard);
   g->packs = g->unpacks = g->wakes = 0;
+  memset(g->romcPage, 0xff, sizeof g->romcPage);
+  g->zipGroup = ~0u;
+  g->inflates = g->romFaults = 0;
   g->romLen = g->rom2Len = 0;
   memset(g->romW, 0, sizeof g->romW);
   g->romWNext = 0;

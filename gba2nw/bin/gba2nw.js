@@ -23,8 +23,9 @@ function usage() {
   gba2nw preparer JEU.gba [options]     écrit le pack du jeu
       -o FICHIER.pack      fichier écrit (défaut : le nom du jeu, en .pack)
       --part1-kb N         place pour la première partie (défaut 2440)
+      --zip                pack compressé (choisi d'office quand le jeu ne tient pas autrement)
+      --ready              pack non compressé, blocs du jeu décompressés d'avance
       --keep-samples       garde les échantillons de son dans le pack
-      --keep-compressed    garde aussi les blocs compressés d'origine
       --plain              aucune préparation : la ROM telle quelle
 
   gba2nw installer FICHIER.pack         installe l'appli et le jeu (calculatrice branchée en USB)
@@ -39,7 +40,8 @@ function prepare(argv) {
     if (a === '-o') out = argv[++i];
     else if (a === '--part1-kb') opts.part1Kb = +argv[++i];
     else if (a === '--keep-samples') opts.keepSamples = true;
-    else if (a === '--keep-compressed') opts.keepCompressed = true;
+    else if (a === '--zip') opts.how = 'zip';
+    else if (a === '--ready') opts.how = 'ready';
     else if (a === '--plain') opts.plain = true;
     else { console.log(`Erreur : option inconnue (${a}).`); return 1; }
   }
@@ -55,14 +57,16 @@ function prepare(argv) {
     console.log('Erreur : ce fichier n\'est pas une ROM Game Boy Advance.');
     return 1;
   }
-  const r = pack.build(rom, { limit1: opts.part1Kb * 1024, keepSamples: opts.keepSamples, keepCompressed: opts.keepCompressed, plain: opts.plain });
+  const r = pack.build(rom, { limit1: opts.part1Kb * 1024, room: ROOM, how: opts.how, keepSamples: opts.keepSamples, plain: opts.plain });
   fs.writeFileSync(out, Buffer.concat([r.part1, r.part2]));
   const p = r.report;
   console.log(`${p.title} (${p.code}), ROM de ${kb(p.romSize)}, sauvegarde : ${{ none: 'aucune', sram: 'SRAM', flash: 'flash 64 Ko', eeprom: 'EEPROM', flash1m: 'flash 128 Ko' }[p.save]}`);
-  console.log(`  de la ROM, ${kb(p.kept)} gardés` +
+  console.log(`  de la ROM, ${kb(p.kept)} gardés tels quels` +
+    (p.deflated ? `, ${kb(p.deflated)} compressés en ${kb(p.deflatedTo)}` : '') +
     (p.sampleBytes ? ` ; son retiré : ${p.samples} échantillons, ${kb(p.sampleBytes)}` : '') +
     (p.streamBytes ? ` ; blocs compressés retirés : ${kb(p.streamBytes)}` : ''));
   if (p.blocks) console.log(`  ${p.blocks} blocs décompressés d'avance : ${kb(p.decompressed)}`);
+  if (p.how === 'zip') console.log('  (pack compressé : le jeu ne tenait pas autrement ; il demandera un peu plus de mémoire vive et de calcul)');
   console.log(`Pack écrit : ${out} (${kb(p.total)}` + (p.size2 ? `, en deux parties : ${kb(p.size1)} + ${kb(p.size2)})` : ')'));
   if (p.save === 'eeprom') console.log('Attention : ce jeu sauvegarde sur une mémoire EEPROM, que nwgba ne connaît pas encore : il ne pourra pas sauvegarder.');
   if (p.total > ROOM) console.log(`Attention : ${kb(p.total)}, c'est plus que ce que la calculatrice peut recevoir (environ ${kb(ROOM)}) : l'installation échouera.`);

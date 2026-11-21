@@ -6,5 +6,6 @@
 #include "ppu.c"
 #include "bios.c"
 #include "pack.c"
+#include "inflate.c"
 #include "save.c"
 #include "irqm.c"

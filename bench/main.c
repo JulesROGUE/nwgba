@@ -101,7 +101,7 @@ static void run(uint32_t drawEvery, const char* label) {
   if(pack_open(&pack, bench_rom, bench_rom_size)) {
     pack_second(&pack, bench_rom + pack.size1);
   } else {
-    pack_plain(&pack, bench_rom, bench_rom_size & ~(PACK_BLOCK - 1), plainTable);
+    pack_plain(&pack, bench_rom, bench_rom_size & ~(PACK_GROUP - 1), plainTable);
     pack.saveType = GBA_SAVE_FLASH;
   }
   memset(mem, 0, sizeof mem);

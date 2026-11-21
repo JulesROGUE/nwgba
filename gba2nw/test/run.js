@@ -7,6 +7,7 @@
  * flash image in place of the hardware.
  */
 const fs = require('fs');
+const zlib = require('zlib');
 const os = require('os');
 const path = require('path');
 const assert = require('assert');
@@ -114,14 +115,16 @@ test('the scanner finds the compressed blocks and the samples, and nothing else'
 
 /* reading a pack back, the way core/pack.c does */
 function readPack(all) {
-  const u32 = (o) => all.readUInt32LE(o);
-  const table = u32(24), runs = u32(32), blobs = u32(40), data = u32(44);
-  const block = (k) => all.subarray(data + k * 256, data + (k + 1) * 256);
+  const u32 = (o) => all.readUInt32LE(o), u24 = (o) => all.readUIntLE(o, 3);
+  const table = u32(24), runs = u32(32), blobs = u32(40), data = u32(44), zipDir = u32(80), zipAt = u32(84);
   return {
-    romSize: u32(20), size1: u32(8), size2: u32(12), split: u32(52), save: u32(56),
-    page: (pg) => {
-      const k = all.readUInt16LE(table + pg * 2);
-      return k >= PACK.PAGE_ONES ? k : block(k);
+    romSize: u32(20), size1: u32(8), size2: u32(12), split: u32(52), save: u32(56), nZip: u32(60), zipAt,
+    zipStarts: Array.from({ length: u32(60) + 1 }, (_, i) => u24(zipDir + 3 * i)),
+    group: (g) => {
+      const k = all.readUInt16LE(table + g * 2);
+      if (k >= PACK.GROUP_ONES) return k;
+      if (k >= PACK.GROUP_ZIP) return zlib.inflateRawSync(all.subarray(zipAt + u24(zipDir + 3 * (k - PACK.GROUP_ZIP)), zipAt + u24(zipDir + 3 * (k - PACK.GROUP_ZIP) + 3)));
+      return all.subarray(data + k * 1024, data + k * 1024 + 1024);
     },
     runs: Array.from({ length: u32(28) }, (_, i) => ({ page: u32(runs + i * 12), pages: u32(runs + i * 12 + 4), block: u32(runs + i * 12 + 8) })),
     blobs: Array.from({ length: u32(36) }, (_, i) => ({ address: u32(blobs + i * 16), size: u32(blobs + i * 16 + 4), block: u32(blobs + i * 16 + 8), kind: u32(blobs + i * 16 + 12) })),
@@ -129,43 +132,80 @@ function readPack(all) {
   };
 }
 
-const built = PACK.build(made.rom, { limit1: 16 * 1024 });
+const built = PACK.build(made.rom, { limit1: 16 * 1024, how: 'ready' });
 const packFile = path.join(tmp, 'test.pack');
 fs.writeFileSync(packFile, Buffer.concat([built.part1, built.part2]));
 
-test('the pack holds the ROM minus what was left out, and the blocks decompressed', () => {
-  const p = readPack(Buffer.concat([built.part1, built.part2]));
-  assert.strictEqual(p.save, PACK.SAVE.flash);
-  assert.strictEqual(p.size1, built.part1.length);
-  assert.ok(p.size2 > 0, 'made to be in two parts');
+/* the ROM as the app must read it back: zeros where the game is not expected to read */
+function expected(streamsToo) {
+  const want = Buffer.concat([made.rom, Buffer.alloc(1024)]);
+  const unread = new Uint8Array(want.length);
+  made.sampleAt.forEach((s, i) => unread.fill(1, s + 16, s + 16 + made.samples[i].length));
+  if (streamsToo) {
+    const ptrs = scan.pointers(made.rom);
+    for (const b of scan.blocks(made.rom, ptrs)) unread.fill(1, b.offset + 4, b.offset + b.length);
+  }
+  for (let i = 0; i < want.length; i++) if (unread[i]) want[i] = 0;
+  return { want, unread };
+}
+function checkGroups(p, streamsToo) {
+  const { want, unread } = expected(streamsToo);
   let leftOut = 0;
-  for (let pg = 0; pg < p.romSize / 256; pg++) {
-    const got = p.page(pg);
-    const want = Buffer.concat([made.rom, Buffer.alloc(256)]).subarray(pg * 256, pg * 256 + 256);
-    if (got === PACK.PAGE_LEFT_OUT) {
+  for (let g = 0; g < p.romSize / 1024; g++) {
+    const got = p.group(g), w = want.subarray(g * 1024, g * 1024 + 1024);
+    if (got === PACK.GROUP_LEFT_OUT) {
       leftOut++;
-      const inSample = made.sampleAt.some((s, i) => pg * 256 >= s + 16 && pg * 256 + 256 <= s + 16 + made.samples[i].length);
-      const inStream = made.pictureAt.some((s) => pg * 256 >= s + 4);
-      assert.ok(inSample || inStream, `page ${pg} left out for no reason`);
-    } else if (got === PACK.PAGE_ZEROS) {
-      assert.ok(want.every((x) => x === 0));
-    } else if (got === PACK.PAGE_ONES) {
-      assert.ok(want.every((x) => x === 0xff));
+      assert.ok(unread.subarray(g * 1024, g * 1024 + 1024).every((x) => x), `group ${g} left out for no reason`);
+    } else if (got === PACK.GROUP_ZEROS) {
+      assert.ok(w.every((x) => x === 0));
+    } else if (got === PACK.GROUP_ONES) {
+      assert.ok(w.every((x) => x === 0xff));
     } else {
-      assert.ok(got.equals(want), `page ${pg} differs`);
+      assert.ok(got.equals(w), `group ${g} differs`);
     }
   }
-  assert.ok(leftOut > 60, 'the samples should be gone');
-  assert.deepStrictEqual(p.blobs.map((b) => b.address - 0x08000000), made.pictureAt);
-  p.blobs.forEach((b, i) => assert.ok(p.bytes(b.block, b.size).equals(made.pictures[i])));
-  /* runs: in order, each in one part, each page pointing where the run says */
+  return leftOut;
+}
+function checkCut(p) {
+  /* runs: in order, each in one part; the cut is between two blocks, or between two deflated groups */
   let last = -1;
   for (const r of p.runs) {
     assert.ok(r.page > last);
+    assert.strictEqual(r.block % 4, 0, 'a run of ROM starts on a group');
     last = r.page + r.pages - 1;
     assert.ok(r.block + r.pages <= p.split || r.block >= p.split, 'a run across the two parts');
   }
   for (const b of p.blobs) assert.ok(b.block + Math.ceil(b.size / 256) <= p.split || b.block >= p.split, 'a block across the two parts');
+  if (p.size1 > p.zipAt) assert.ok(p.zipStarts.includes(p.size1 - p.zipAt), 'the cut goes through a deflated group');
+}
+
+test('a "ready" pack holds the ROM minus what was left out, and the blocks decompressed', () => {
+  const p = readPack(Buffer.concat([built.part1, built.part2]));
+  assert.strictEqual(p.save, PACK.SAVE.flash);
+  assert.strictEqual(p.size1, built.part1.length);
+  assert.ok(p.size2 > 0, 'made to be in two parts');
+  assert.ok(checkGroups(p, true) > 10, 'the samples should be gone');
+  assert.deepStrictEqual(p.blobs.map((b) => b.address - 0x08000000), made.pictureAt);
+  p.blobs.forEach((b, i) => assert.ok(p.bytes(b.block, b.size).equals(made.pictures[i])));
+  checkCut(p);
+});
+
+test('a "zip" pack holds the whole ROM but the samples, deflated where it is not program', () => {
+  for (const limit1 of [16 * 1024, 6 * 1024, 1 << 30]) {
+    const z = PACK.build(made.rom, { limit1, how: 'zip' });
+    const p = readPack(Buffer.concat([z.part1, z.part2]));
+    assert.strictEqual(p.size1, z.part1.length);
+    assert.strictEqual(p.blobs.length, 0);
+    assert.ok(p.nZip > 0, 'something should be deflated');
+    checkGroups(p, false);
+    checkCut(p);
+    assert.ok(z.report.total < built.report.total, 'smaller than the pack with everything ready');
+  }
+});
+
+test('the way of packing is chosen by the room there is', () => {
+  assert.strictEqual(PACK.build(made.rom, { room: 1 << 30 }).report.how, 'ready');
+  assert.strictEqual(PACK.build(made.rom, { room: built.report.total - 1 }).report.how, 'zip');
 });
 
 test('a pack in two parts splits as written', () => {

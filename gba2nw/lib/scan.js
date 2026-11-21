@@ -119,8 +119,8 @@ function pointedAt(sorted, from, to) {
 }
 
 /* The sound samples of the usual sound driver: [{offset, size}] (size: the
- * body, after 16 bytes of header). A sample is 16 bytes of header (flags,
- * pitch, where it loops, its length) and its body. To be taken for one:
+ * body as stored, after 16 bytes of header). A sample is 16 bytes of header
+ * (flags, pitch, where it loops, its length) and its body. To be taken for one:
  *  - the pointer to it sits in an instrument, as the driver keeps them: a
  *    kind byte it knows, a key, a zero, a pan, then the pointer;
  *  - it ends right where the next thing pointed at begins;
@@ -134,20 +134,24 @@ function samples(rom, ptrs) {
     const v = rom.readUInt32LE(o);
     if (v < ROM_BASE || v >= ROM_BASE + rom.length) continue;
     const kind = rom[o - 4];
-    if ((kind === 0x00 || kind === 0x08 || kind === 0x10 || kind === 0x18) && rom[o - 3] < 0x80 && rom[o - 2] === 0) instrument.add(v - ROM_BASE);
+    /* (bits 3 and 4: fixed pitch, reversed; bit 5: a sample stored compressed, as cries are) */
+    if ((kind & 0xc7) === 0 && rom[o - 3] < 0x80 && rom[o - 2] === 0) instrument.add(v - ROM_BASE);
   }
   const found = [];
   let busyUntil = 0;
   for (const p of sorted) {
     if (p < busyUntil || (p & 3) || p + 16 > rom.length || !instrument.has(p)) continue;
     const type = rom.readUInt32LE(p), freq = rom.readUInt32LE(p + 4), loop = rom.readUInt32LE(p + 8), size = rom.readUInt32LE(p + 12);
-    if (type !== 0 && type !== 0x40000000) continue;
+    if ((type & ~0x40000001) !== 0) continue;
     if (freq < 500 * 1024 || freq > 60000 * 1024) continue;
-    if (size < 256 || size > 400000 || loop > size || p + 16 + size > rom.length) continue;
-    const around = pointedAt(sorted, p, p + 16 + size);
-    if (around.gap > 7 || around.inside > 2 + size / 512) continue;
-    found.push({ offset: p, size });
-    busyUntil = p + 16 + size;
+    if (size < 256 || size > 400000 || loop > size) continue;
+    /* a compressed sample: 33 bytes for each 64 samples, the last lot cut short */
+    const stored = (type & 1) ? Math.ceil(size * 33 / 64) : size;
+    if (p + 16 + stored > rom.length) continue;
+    const around = pointedAt(sorted, p, p + 16 + stored);
+    if (around.gap > 7 || around.inside > 2 + stored / 512) continue;
+    found.push({ offset: p, size: stored });
+    busyUntil = p + 16 + stored;
   }
   /* one or two look-alikes prove nothing: a game with samples has dozens */
   if (found.length < 8) return [];
