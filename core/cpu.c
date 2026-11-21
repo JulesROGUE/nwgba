@@ -72,10 +72,13 @@ static void restoreCpsr(Gba* g) {
   if(!modeIndex(g->cpu.cpsr)) return;
   const bool fromIrq = (g->cpu.cpsr & 0x1f) == 0x12;
   cpu_setCpsr(g, g->cpu.spsr);
-  if(fromIrq && g->irqDepth && --g->irqDepth == 0) {
-    g->busy = g->irqBusy;
-    g->idleHeld = g->irqHeld;
-    if(g->tracing) irqm_end(g);
+  if(fromIrq && g->irqDepth) {
+    g->irqDepth--;
+    if(g->tracing && g->irqDepth == g->watch.depth) irqm_end(g);   /* the handler watched is back, even if inside another */
+    if(g->irqDepth == 0) {
+      g->busy = g->irqBusy;
+      g->idleHeld = g->irqHeld;
+    }
   }
 }
 

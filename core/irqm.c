@@ -129,6 +129,14 @@ void irqm_write(Gba* g, uint32_t a, uint32_t size, uint32_t v) {
   }
 }
 
+/* A record is for a set of interrupts taken together, and for whether they
+ * came inside another handler: games do a frame's work inside the handler of
+ * the end of the picture, with the others let in, and what a handler reads
+ * there (which interrupts are let in, for one) is not what it reads elsewhere. */
+static inline uint32_t keyOf(const Gba* g) {
+  return (g->io[REG_IE >> 1] & g->io[REG_IF >> 1] & 0x3fff) | (g->irqDepth ? 0x8000u : 0);
+}
+
 static IrqMemo* find(Gba* g, uint32_t source) {
   for(int i = 0; i < IRQM_SLOTS; i++)
     if(g->memo[i].source == source) return &g->memo[i];
@@ -143,8 +151,8 @@ static void forget(IrqMemo* m) {
 }
 
 void irqm_begin(Gba* g) {
-  if(g->irqDepth || g->tracing) return;
-  const uint32_t source = g->io[REG_IE >> 1] & g->io[REG_IF >> 1] & 0x3fff;
+  if(g->tracing) return;
+  const uint32_t source = keyOf(g);
   const uint32_t line = g->io[REG_VCOUNT >> 1] & 255;
   IrqMemo* m = find(g, source);
   if(!m) {   /* a record for this set of interrupts: an unused one, else the one that knows least */
@@ -164,6 +172,7 @@ void irqm_begin(Gba* g) {
   IrqWatch* w = &g->watch;
   w->memo = m;
   w->line = (uint8_t)line;
+  w->depth = (uint8_t)g->irqDepth;
   w->impure = false;
   w->wroteIrq = w->wroteIme = false;
   w->cycles0 = g->cycles;
@@ -214,9 +223,8 @@ void irqm_end(Gba* g) {
 }
 
 bool irqm_skip(Gba* g) {
-  if(g->irqDepth || g->tracing) return false;
-  const uint32_t source = g->io[REG_IE >> 1] & g->io[REG_IF >> 1] & 0x3fff;
-  IrqMemo* m = find(g, source);
+  if(g->tracing) return false;
+  IrqMemo* m = find(g, keyOf(g));
   if(!m || !m->known || !bit(m->lines, g->io[REG_VCOUNT >> 1] & 255)) return false;
   for(int i = 0; i < m->nReads; i++) {
     if(see(g, m->addr[i], m->size[i]) == m->value[i]) continue;

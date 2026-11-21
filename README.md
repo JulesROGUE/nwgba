@@ -47,13 +47,13 @@ Advance Wars, dans une carte de bataille :
 |---|---|---|---|
 | instructions, sans dessiner | 4,7 millions | 2,0 millions | 1,1 million |
 | instructions, en dessinant | 6,8 millions | 3,0 millions | 2,2 millions |
-| défauts de cache dans la flash, en dessinant (caches de 8 Ko) | | | 11 800 |
-| temps sur la calculatrice : sans dessiner / en dessinant | | | 21 ms / 36 ms (41 ms étiré) |
+| défauts de cache dans la flash, sans dessiner (caches de 8 Ko) | | 10 600 | 4 400 |
+| temps sur la calculatrice, sans dessiner | | 21 ms mesurés | 12 ms attendus |
 
 Ce qui a compté :
 
 - **les boucles d'attente sont sautées** : un saut en arrière repris avec les mêmes registres et rien d'écrit entre-temps ne changera rien avant le prochain événement, l'horloge y va directement. Une boucle qui n'a lu aucun registre n'est même pas relancée tant que la mémoire et les boutons ne changent pas ;
-- **les interruptions qui ne font rien ne sont pas prises** (`core/irqm.c`) : le jeu en demande une à chaque ligne de l'image, et sur presque toutes son gestionnaire regarde le numéro de la ligne et revient. Un gestionnaire est observé pendant qu'il tourne ; s'il n'a fait qu'acquitter l'interruption, alors sur cette ligne, tant que ce qu'il a lu n'a pas changé, l'interruption est acquittée sans l'exécuter. 82 % des interruptions d'Advance Wars passent ainsi ;
+- **les interruptions qui ne font rien ne sont pas prises** (`core/irqm.c`) : le jeu en demande une à chaque ligne de l'image, et sur presque toutes son gestionnaire regarde le numéro de la ligne et revient. Un gestionnaire est observé pendant qu'il tourne ; s'il n'a fait qu'acquitter l'interruption, alors sur cette ligne, tant que ce qu'il a lu n'a pas changé, l'interruption est acquittée sans l'exécuter. 82 % des interruptions d'Advance Wars passent ainsi ; Cela vaut aussi quand elles arrivent au milieu d'un autre gestionnaire : Advance Wars fait le travail d'une image dans celui de fin d'image, et les vingt-cinq interruptions de ligne qui tombaient pendant ce temps étaient toutes prises. Chacune remplaçait dans le cache le code du jeu par celui des interruptions, puis l'inverse : les sauter a divisé par 2,4 les relectures de la flash ;
 - **le mixeur de son est sauté** : le pilote de son de la plupart des jeux (« MP2K ») mélange ses voix avec une routine qu'il copie en mémoire ; sa boucle est court-circuitée au passage ;
 - **la boucle de l'interprète** garde sa place et son horloge dans des registres, fait les instructions courantes sur place, et ne regarde l'heure qu'aux sauts ;
 - **le dessin** ne va chercher qu'une fois par ligne la rangée de la carte, ne relit pas une tuile identique à la précédente, écrit d'un bloc les tuiles sans pixel transparent, et ne cherche les sprites visibles que quand leur table change.

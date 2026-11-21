@@ -76,7 +76,7 @@ typedef struct Timer {
 } Timer;
 
 /* interrupt handlers seen to do nothing (irqm.c) */
-#define IRQM_SLOTS 4
+#define IRQM_SLOTS 6
 #define IRQM_READS 16
 typedef struct IrqMemo {
   uint16_t source;              /* the interrupts taken together (IE & IF); 0: unused */
@@ -95,6 +95,7 @@ typedef struct IrqMemo {
 typedef struct IrqWatch {
   IrqMemo* memo;
   uint8_t line, nReads;
+  uint8_t depth;                /* how many handlers were already running when this one was entered */
   bool impure, wroteIrq, wroteIme;
   uint16_t ie0, ime0, ack;
   uint32_t cycles0, cpsr0;
