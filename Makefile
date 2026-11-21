@@ -33,7 +33,7 @@ ARM_LDFLAGS += -Wl,-e,main -Wl,-u,eadk_app_name -Wl,-u,eadk_app_icon -Wl,-u,eadk
 ARM_LDFLAGS += -Wl,--gc-sections
 APP_SRC = $(CORE) core/flash.c numworks/main.c
 
-.PHONY: nwa nwa-check
+.PHONY: nwa nwa-check ramtest
 nwa: $(BUILD)/nwgba.nwa
 
 $(BUILD)/icon.o: numworks/icon.png | $(BUILD)
@@ -48,6 +48,11 @@ $(BUILD)/nwa/all.o: core/all.c $(CORE) $(HEADERS)
 
 $(BUILD)/nwgba.nwa: $(BUILD)/nwa/all.o core/flash.c numworks/main.c $(HEADERS) $(BUILD)/icon.o
 	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) $(BUILD)/nwa/all.o core/flash.c numworks/main.c $(BUILD)/icon.o -o $@
+
+# a test app: can code run from RAM on the calculator, and what is it worth (numworks/ramtest.c)
+ramtest: $(BUILD)/ramtest.nwa
+$(BUILD)/ramtest.nwa: numworks/ramtest.c $(BUILD)/icon.o
+	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) numworks/ramtest.c $(BUILD)/icon.o -o $@
 
 nwa-check: $(BUILD)/nwgba.nwa
 	printf 'none' > $(BUILD)/empty.pack
