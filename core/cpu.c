@@ -56,14 +56,15 @@ uint32_t cpu_getCpsr(const Cpu* c) {
 
 void cpu_setCpsr(Gba* g, uint32_t v) {
   Cpu* c = &g->cpu;
+  const uint32_t was = c->cpsr;
   g->busy = 1;
-  switchMode(c, v);
+  if((was ^ v) & 0x1f) switchMode(c, v);
   c->fn = v;
   c->fz = !(v & 0x40000000u);
   c->fc = (v >> 29) & 1;
   c->fv = (v >> 28) & 1;
   c->cpsr = (v & 0xff) | 0x10;
-  gba_poke(g);   /* interrupts may have been let in */
+  if((was & I_BIT) && !(v & I_BIT)) gba_poke(g);   /* interrupts were let in */
 }
 
 /* CPSR back from SPSR (in the modes that have one) */
@@ -198,7 +199,7 @@ static uint32_t shiftReg(int type, uint32_t v, uint32_t n, uint32_t* carry) {
 }
 
 /* by an amount in the instruction (0-31, 0 having its special meanings) */
-static uint32_t shiftImm(const Cpu* c, int type, uint32_t v, uint32_t n, uint32_t* carry) {
+static inline uint32_t shiftImm(const Cpu* c, int type, uint32_t v, uint32_t n, uint32_t* carry) {
   switch(type) {
     case 0:
       if(!n) return v;
@@ -826,31 +827,46 @@ static void thumbExec(Gba* g, uint32_t op) {
 
 /* ---------------------------------------------------------------- loop -- */
 
-/* The loops below run inside one page of code, with the place in the page
- * (off) and the cycles left in the slice (left) in local variables. r[15]
- * and g->cycles are only brought up to date around calls that need them. */
+/* The loop runs inside one stretch of code (the whole ROM, or one page of
+ * RAM) with the place in it (off) and the cycles left in the slice (left)
+ * in local variables; r[15] and g->cycles are brought up to date around the
+ * calls that need them. Common instructions are done here, reading and
+ * writing the RAMs and the ROM directly; the rest go to thumbExec and
+ * armExec. The end of the slice is only looked at when a jump is taken and
+ * after those calls, so a slice can overrun by a straight run of
+ * instructions. */
 
 #define SYNC_OUT() (g->cycles = g->target - (uint32_t)left)
 #define SYNC_IN() (left = (int32_t)(g->target - g->cycles))
+#ifdef GBA_STATS
+#define COUNT() (g->instrs++)
+#else
+#define COUNT() ((void)0)
+#endif
 
-/* memory, the fast way for the two RAMs and the ROM, else through mem.c */
-#define RD(bits, addr, dst, mask, costE, costR)                                              \
-  do {                                                                                       \
-    const uint32_t a_ = (addr);                                                              \
-    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                       \
-      dst = ld##bits(g->iwR[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK));         \
-      left -= 1;                                                                             \
+#define B2(n) n, n + 1, n + 1, n + 2
+#define B4(n) B2(n), B2(n + 1), B2(n + 1), B2(n + 2)
+#define B6(n) B4(n), B4(n + 1), B4(n + 1), B4(n + 2)
+static const uint8_t kPop8[256] = {B6(0), B6(1), B6(1), B6(2)};   /* bits set in a byte */
+
+/* reading: the fast RAM, the ROM, the slow RAM, else through mem.c */
+#define RD(bits, addr, dst, mask, costE, costR)                                                  \
+  do {                                                                                           \
+    const uint32_t a_ = (addr);                                                                  \
+    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                           \
+      dst = ld##bits(g->iwR[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK));             \
+      left -= 1;                                                                                 \
     } else if((a_ & (0xfe000000u | (mask))) == 0x08000000u && (a_ & 0x01ffffffu) < g->romSize) { \
-      dst = ld##bits(g->rom + (a_ & 0x01ffffffu));                                           \
-      left -= (int32_t)(costR);                                                              \
-    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                \
-      dst = ld##bits(g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK));         \
-      left -= (costE);                                                                       \
-    } else {                                                                                 \
-      SYNC_OUT();                                                                            \
-      dst = slow##bits(g, a_);                                                               \
-      SYNC_IN();                                                                             \
-    }                                                                                        \
+      dst = ld##bits(g->rom + (a_ & 0x01ffffffu));                                               \
+      left -= (int32_t)(costR);                                                                  \
+    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                    \
+      dst = ld##bits(g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK));             \
+      left -= (costE);                                                                           \
+    } else {                                                                                     \
+      SYNC_OUT();                                                                                \
+      dst = slow##bits(g, a_);                                                                   \
+      SYNC_IN();                                                                                 \
+    }                                                                                            \
   } while(0)
 #define ld8(p) (*(const uint8_t*)(p))
 #define slow8(g, a) mem_r8(g, a)
@@ -860,64 +876,128 @@ static void thumbExec(Gba* g, uint32_t op) {
 #define RD16(addr, dst) RD(16, addr, dst, 1u, 3, g->romN[0])
 #define RD32(addr, dst) RD(32, addr, dst, 3u, 6, g->romN[0] + g->romS[0])
 
-#define WR(bits, addr, val, mask, costE)                                                     \
-  do {                                                                                       \
-    const uint32_t a_ = (addr), v_ = (val);                                                  \
-    uint8_t* p_;                                                                             \
-    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                       \
-      p_ = g->iwW[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK);                    \
-      left -= 1;                                                                             \
-    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                \
-      p_ = g->ewW[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK);                    \
-      left -= (costE);                                                                       \
-    } else {                                                                                 \
-      SYNC_OUT();                                                                            \
-      mem_w##bits(g, a_ & ~(uint32_t)(mask), v_);                                            \
-      SYNC_IN();                                                                             \
-      break;                                                                                 \
-    }                                                                                        \
-    g->dirty ^= (ld##bits(p_) ^ (v_ & (uint32_t)(0xffffffffu >> (32 - bits)))) * sigOf(a_);  \
-    st##bits(p_, v_);                                                                        \
+/* writing: the two RAMs, else through mem.c; that may end the slice or move
+ * the code (RESYNC), so anything else the instruction does comes before */
+#define WR(bits, addr, val, mask, costE)                                                        \
+  do {                                                                                          \
+    const uint32_t a_ = (addr), v_ = (val);                                                     \
+    uint8_t* p_;                                                                                \
+    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                          \
+      p_ = g->iwW[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK);                       \
+      left -= 1;                                                                                \
+    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u &&                                   \
+              (p_ = g->ewW[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)]) != NULL) {                    \
+      p_ += a_ & PG_MASK;                                                                       \
+      left -= (costE);                                                                          \
+    } else {                                                                                    \
+      SYNC_OUT();                                                                               \
+      mem_w##bits(g, a_ & ~(uint32_t)(mask), v_);                                               \
+      SYNC_IN();                                                                                \
+      if(left <= 0 || g->codeLen != len) goto RESYNC;                                           \
+      break;                                                                                    \
+    }                                                                                           \
+    g->dirty ^= (ld##bits(p_) ^ (v_ & (uint32_t)(0xffffffffu >> (32 - bits)))) * sigOf(a_);     \
+    st##bits(p_, v_);                                                                           \
   } while(0)
 #define st8(p, v) (*(uint8_t*)(p) = (uint8_t)(v))
 #define WR8(addr, val) WR(8, addr, val, 0u, 3)
 #define WR16(addr, val) WR(16, addr, val, 1u, 3)
 #define WR32(addr, val) WR(32, addr, val, 3u, 6)
 
-/* a jump: inside the page it only moves off, else the loop is left */
-#define JUMP(target)                           \
-  do {                                         \
-    const uint32_t t_ = (target) & ~1u;        \
-    left -= 2 * (int32_t)cost;                 \
-    if(t_ - base < len) {                      \
-      off = t_ - base;                         \
-    } else {                                   \
-      r[15] = t_ + 4;                          \
-      goto leave;                              \
-    }                                          \
+/* a stack of n words at a, all in one page of the fast RAM? */
+#define STACK_OK(a, n) (((a) & 0xff000003u) == 0x03000000u && ((a) & PG_MASK) + 4 * (n) <= PG_SIZE)
+
+/* a waiting loop found: the rest of the slice goes */
+#define IDLE_AT(at)                    \
+  do {                                 \
+    if(idleHook(g, at) && left > 0) {  \
+      g->idleCycles += (uint32_t)left; \
+      left = 0;                        \
+    }                                  \
   } while(0)
 
-static void runThumb(Gba* g) {
+/* one data-processing instruction of ARM; k is the operation and the S bit,
+ * always a constant, so only one of the cases is left where this is used */
+static inline __attribute__((always_inline)) void armAlu(Cpu* c, uint32_t k, uint32_t* d, uint32_t a, uint32_t b, uint32_t sc) {
+  uint32_t v;
+  switch(k) {
+    case 0x00: *d = a & b; return;
+    case 0x01: v = a & b; break;
+    case 0x02: *d = a ^ b; return;
+    case 0x03: v = a ^ b; break;
+    case 0x04: *d = a - b; return;
+    case 0x05: *d = subFlags(c, a, b); return;
+    case 0x06: *d = b - a; return;
+    case 0x07: *d = subFlags(c, b, a); return;
+    case 0x08: *d = a + b; return;
+    case 0x09: *d = addFlags(c, a, b); return;
+    case 0x0a: *d = a + b + c->fc; return;
+    case 0x0b: *d = adcFlags(c, a, b); return;
+    case 0x0c: *d = a - b - !c->fc; return;
+    case 0x0d: *d = sbcFlags(c, a, b); return;
+    case 0x0e: *d = b - a - !c->fc; return;
+    case 0x0f: *d = sbcFlags(c, b, a); return;
+    case 0x11: setNZ(c, a & b); c->fc = sc; return;
+    case 0x13: setNZ(c, a ^ b); c->fc = sc; return;
+    case 0x15: subFlags(c, a, b); return;
+    case 0x17: addFlags(c, a, b); return;
+    case 0x18: *d = a | b; return;
+    case 0x19: v = a | b; break;
+    case 0x1a: *d = b; return;
+    case 0x1b: v = b; break;
+    case 0x1c: *d = a & ~b; return;
+    case 0x1d: v = a & ~b; break;
+    case 0x1e: *d = ~b; return;
+    default: v = ~b; break;
+  }
+  *d = v;
+  setNZ(c, v);
+  c->fc = sc;
+}
+
+void cpu_run(Gba* g) {
   Cpu* const c = &g->cpu;
   uint32_t* const r = c->r;
-  {
-    const uint32_t pc = r[15] - 4;
-    if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
-  }
-  const uint8_t* const page = g->codePtr;
-  const uint32_t base = g->codeBase, len = g->codeLen, cost = g->codeCostT;
-  uint32_t off = r[15] - 4 - base;
+  const uint8_t* page;
+  uint32_t base, len, cost, off;
   int32_t left = (int32_t)(g->target - g->cycles);
-  /* PC as the instruction sees it (its address + 4), after off has moved past it */
+  if(left <= 0) return;
+  if(!(c->cpsr & T_BIT)) goto arm_enter;
+
+  /* -------------------------------------------------------------- Thumb */
+thumb_enter : {
+  const uint32_t pc = r[15] - 4;
+  if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
+  page = g->codePtr;
+  base = g->codeBase;
+  len = g->codeLen;
+  cost = g->codeCostT;
+  off = pc - base;
+}
+/* PC as the instruction sees it (its address + 4), once off has moved past it */
 #define PC4 (base + off + 2)
-  while(left > 0 && off < len) {
+#define RESYNC resync_t
+/* a jump taken: the only place the end of the slice is looked at */
+#define TJUMP(target)                   \
+  do {                                  \
+    const uint32_t t_ = (target) & ~1u; \
+    left -= 2 * (int32_t)cost;          \
+    off = t_ - base;                    \
+    if(left <= 0) {                     \
+      r[15] = t_ + 4;                   \
+      goto out;                         \
+    }                                   \
+  } while(0)
+  for(;;) {
+    if(off >= len) {   /* out of this stretch of code */
+      r[15] = base + off + 4;
+      goto thumb_enter;
+    }
     const uint32_t op = ld16(page + off);
     off += 2;
     left -= (int32_t)cost;
-#ifdef GBA_STATS
-    g->instrs++;
-#endif
-    switch(op >> 8) {
+    COUNT();
+    switch((uint8_t)(op >> 8)) {
       case 0x00 ... 0x07: {
         uint32_t v = r[(op >> 3) & 7];
         const uint32_t n = (op >> 6) & 31;
@@ -998,25 +1078,45 @@ static void runThumb(Gba* g) {
       }
       case 0x44: {
         const uint32_t rd = (op & 7) | ((op >> 4) & 8), rs = (op >> 3) & 15;
-        if(rd == 15 || rs == 15) goto slow;
+        if(rd == 15 || rs == 15) goto slow_t;
         r[rd] += r[rs];
         continue;
       }
       case 0x45: {
         const uint32_t rd = (op & 7) | ((op >> 4) & 8), rs = (op >> 3) & 15;
-        if(rd == 15 || rs == 15) goto slow;
+        if(rd == 15 || rs == 15) goto slow_t;
         subFlags(c, r[rd], r[rs]);
         continue;
       }
       case 0x46: {
         const uint32_t rd = (op & 7) | ((op >> 4) & 8), rs = (op >> 3) & 15;
-        if(rd == 15 || rs == 15) goto slow;
+        if(rd == 15 || rs == 15) goto slow_t;
         r[rd] = r[rs];
         continue;
       }
-      case 0x48 ... 0x4f: {
+      case 0x47: {   /* BX */
+        const uint32_t rs = (op >> 3) & 15;
+        if((op & 0x80) || rs == 15) goto slow_t;
+        const uint32_t t = r[rs];
+        if(t & 1) {
+          TJUMP(t);
+          continue;
+        }
+        c->cpsr &= ~T_BIT;
+        left -= 2 * (int32_t)cost;
+        r[15] = (t & ~3u) + 8;
+        if(left <= 0) goto out;
+        goto arm_enter;
+      }
+      case 0x48 ... 0x4f: {   /* a constant from the code itself */
+        const uint32_t a = (PC4 & ~2u) + (op & 0xff) * 4;
         uint32_t v;
-        RD32((PC4 & ~2u) + (op & 0xff) * 4, v);
+        if(a - base <= len - 4) {
+          v = ld32(page + (a - base));
+          left -= (int32_t)g->codeCostL;
+        } else {
+          RD32(a, v);
+        }
         r[(op >> 8) & 7] = v;
         left--;
         continue;
@@ -1034,7 +1134,7 @@ static void runThumb(Gba* g) {
           case 5: RD16(a, v); *d = v; left--; continue;
           case 6: RD8(a, v); *d = v; left--; continue;
           default:
-            if(a & 1) goto slow;
+            if(a & 1) goto slow_t;
             RD16(a, v);
             *d = (uint32_t)(int16_t)v;
             left--;
@@ -1080,10 +1180,10 @@ static void runThumb(Gba* g) {
         else r[13] += (op & 0x7f) * 4;
         continue;
       case 0xb4:
-      case 0xb5: {   /* PUSH, on a stack in one page of the fast RAM */
-        const uint32_t n = (uint32_t)__builtin_popcount(op & 0x1ff);
+      case 0xb5: {   /* PUSH */
+        const uint32_t n = kPop8[op & 0xff] + ((op >> 8) & 1);
         uint32_t a = r[13] - 4 * n;
-        if((a & 0xff000003u) != 0x03000000u || (a & PG_MASK) + 4 * n > PG_SIZE) goto slow;
+        if(!STACK_OK(a, n)) goto slow_t;
         r[13] = a;
         uint8_t* p = g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
         uint32_t list = (op & 0xff) | ((op & 0x100) << 6);   /* bit 14: lr */
@@ -1098,10 +1198,11 @@ static void runThumb(Gba* g) {
         left -= (int32_t)n;
         continue;
       }
-      case 0xbc: {   /* POP without pc */
-        const uint32_t n = (uint32_t)__builtin_popcount(op & 0xff);
+      case 0xbc:
+      case 0xbd: {   /* POP */
+        const uint32_t n = kPop8[op & 0xff] + ((op >> 8) & 1);
         const uint32_t a = r[13];
-        if((a & 0xff000003u) != 0x03000000u || (a & PG_MASK) + 4 * n > PG_SIZE) goto slow;
+        if(!STACK_OK(a, n)) goto slow_t;
         const uint8_t* p = g->iwR[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
         uint32_t list = op & 0xff;
         while(list) {
@@ -1111,86 +1212,296 @@ static void runThumb(Gba* g) {
         }
         r[13] = a + 4 * n;
         left -= (int32_t)n + 1;
+        if(op & 0x100) TJUMP(ld32(p));
         continue;
       }
-      case 0xd0 ... 0xdd:
-        if(cond(c, (op >> 8) & 15)) {
-          if((op & 0x80) && idleHook(g, PC4)) {
-            g->idleCycles += (uint32_t)left;
-            left = 0;
-          }
-          JUMP(PC4 + (uint32_t)((int32_t)(int8_t)op * 2));
-        }
+#define TBCC(n, test)  \
+  case 0xd0 + (n):     \
+    if(test) goto bcc; \
+    continue;
+        TBCC(0, !c->fz)
+        TBCC(1, c->fz)
+        TBCC(2, c->fc)
+        TBCC(3, !c->fc)
+        TBCC(4, c->fn >> 31)
+        TBCC(5, !(c->fn >> 31))
+        TBCC(6, c->fv)
+        TBCC(7, !c->fv)
+        TBCC(8, c->fc && c->fz)
+        TBCC(9, !c->fc || !c->fz)
+        TBCC(10, (c->fn >> 31) == c->fv)
+        TBCC(11, (c->fn >> 31) != c->fv)
+        TBCC(12, c->fz && (c->fn >> 31) == c->fv)
+        TBCC(13, !c->fz || (c->fn >> 31) != c->fv)
+#undef TBCC
+      bcc:
+        if(op & 0x80) IDLE_AT(PC4);
+        TJUMP(PC4 + (uint32_t)((int32_t)(int8_t)op * 2));
         continue;
       case 0xe0 ... 0xe7:
-        if((op & 0x400) && idleHook(g, PC4)) {
-          g->idleCycles += (uint32_t)left;
-          left = 0;
-        }
-        JUMP(PC4 + (uint32_t)((int32_t)(op << 21) >> 20));
+        if(op & 0x400) IDLE_AT(PC4);
+        TJUMP(PC4 + (uint32_t)((int32_t)(op << 21) >> 20));
         continue;
       case 0xf0 ... 0xf7: r[14] = PC4 + (uint32_t)((int32_t)(op << 21) >> 9); continue;
       case 0xf8 ... 0xff: {
         const uint32_t t = r[14] + ((op & 0x7ff) << 1);
         r[14] = (base + off) | 1;
-        JUMP(t);
+        TJUMP(t);
         continue;
       }
       default:
-      slow:
+      slow_t:
         r[15] = PC4;
         SYNC_OUT();
         thumbExec(g, op);
         r[15] += 2;
         SYNC_IN();
-        if(!(c->cpsr & T_BIT) || r[15] - 4 - base >= len) return;
+        if(left <= 0) goto out;
+        if(!(c->cpsr & T_BIT)) goto arm_enter;
+        if(g->codeLen != len) goto thumb_enter;
         off = r[15] - 4 - base;
         continue;
     }
   }
+resync_t:
   r[15] = base + off + 4;
-leave:
-  SYNC_OUT();
+  if(left <= 0) goto out;
+  goto thumb_enter;
 #undef PC4
-}
+#undef RESYNC
+#undef TJUMP
 
-static void runArm(Gba* g) {
-  Cpu* const c = &g->cpu;
-  uint32_t* const r = c->r;
-  {
-    const uint32_t pc = r[15] - 8;
-    if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
-  }
-  const uint8_t* const page = g->codePtr;
-  const uint32_t base = g->codeBase, len = g->codeLen, cost = g->codeCostA;
-  uint32_t off = r[15] - 8 - base;
-  int32_t left = (int32_t)(g->target - g->cycles);
-  while(left > 0 && off < len) {
+  /* ---------------------------------------------------------------- ARM */
+arm_enter : {
+  const uint32_t pc = r[15] - 8;
+  if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
+  page = g->codePtr;
+  base = g->codeBase;
+  len = g->codeLen;
+  cost = g->codeCostA;
+  off = pc - base;
+}
+#define RESYNC resync_a
+#define AJUMP(target)                   \
+  do {                                  \
+    const uint32_t t_ = (target) & ~3u; \
+    left -= 2 * (int32_t)cost;          \
+    off = t_ - base;                    \
+    if(left <= 0) {                     \
+      r[15] = t_ + 8;                   \
+      goto out;                         \
+    }                                   \
+  } while(0)
+  for(;;) {
+    if(off >= len) {
+      r[15] = base + off + 8;
+      goto arm_enter;
+    }
     const uint32_t op = ld32(page + off);
     off += 4;
     left -= (int32_t)cost;
-#ifdef GBA_STATS
-    g->instrs++;
-#endif
+    COUNT();
     if(op >> 28 != 14 && !cond(c, op >> 28)) continue;
     const uint32_t pc8 = base + off + 4;   /* the instruction's address + 8 */
     r[15] = pc8;
-    SYNC_OUT();
-    armExec(g, op);
-    SYNC_IN();
-    if(r[15] != pc8 || (c->cpsr & T_BIT)) {   /* it jumped */
-      r[15] += 4;
-      if((c->cpsr & T_BIT) || r[15] - 8 - base >= len) return;
-      off = r[15] - 8 - base;
+    switch((op >> 20) & 0xff) {
+/* an operation on a register shifted by a constant */
+#define ALU_REG(k)                                                                \
+  case(k): {                                                                      \
+    if(op & 0x10) {                                                               \
+      if(op & 0x80) goto misc_a;                                                  \
+      goto slow_a;                                                                \
+    }                                                                             \
+    const uint32_t rd = (op >> 12) & 15;                                          \
+    if(rd == 15) goto slow_a;                                                     \
+    uint32_t b = r[op & 15], sc = c->fc;                                          \
+    if(op & 0xfe0) b = shiftImm(c, (int)((op >> 5) & 3), b, (op >> 7) & 31, &sc); \
+    armAlu(c, k, &r[rd], r[(op >> 16) & 15], b, sc);                              \
+    continue;                                                                     \
+  }
+/* and on a constant */
+#define ALU_IMM(k)                                         \
+  case 0x20 + (k): {                                       \
+    const uint32_t rd = (op >> 12) & 15;                   \
+    if(rd == 15) goto slow_a;                              \
+    const uint32_t rot = (op >> 7) & 30;                   \
+    uint32_t b = op & 0xff, sc = c->fc;                    \
+    if(rot) {                                              \
+      b = ror32(b, rot);                                   \
+      sc = b >> 31;                                        \
+    }                                                      \
+    armAlu(c, k, &r[rd], r[(op >> 16) & 15], b, sc);       \
+    continue;                                              \
+  }
+#define ALU_BOTH(k) ALU_REG(k) ALU_IMM(k)
+        ALU_BOTH(0x00) ALU_BOTH(0x01) ALU_BOTH(0x02) ALU_BOTH(0x03) ALU_BOTH(0x04) ALU_BOTH(0x05) ALU_BOTH(0x06) ALU_BOTH(0x07)
+        ALU_BOTH(0x08) ALU_BOTH(0x09) ALU_BOTH(0x0a) ALU_BOTH(0x0b) ALU_BOTH(0x0c) ALU_BOTH(0x0d) ALU_BOTH(0x0e) ALU_BOTH(0x0f)
+        ALU_BOTH(0x11) ALU_BOTH(0x13) ALU_BOTH(0x15) ALU_BOTH(0x17)
+        ALU_BOTH(0x18) ALU_BOTH(0x19) ALU_BOTH(0x1a) ALU_BOTH(0x1b) ALU_BOTH(0x1c) ALU_BOTH(0x1d) ALU_BOTH(0x1e) ALU_BOTH(0x1f)
+#undef ALU_BOTH
+#undef ALU_REG
+#undef ALU_IMM
+      case 0x10:
+      case 0x14:   /* MRS */
+        if((op & 0x0fbf0fff) != 0x010f0000) goto slow_a;
+        r[(op >> 12) & 15] = (op & 0x00400000) ? c->spsr : cpu_getCpsr(c);
+        continue;
+      case 0x12: {   /* BX */
+        if((op & 0x0ffffff0) != 0x012fff10) goto slow_a;
+        const uint32_t t = r[op & 15];
+        if(!(t & 1)) {
+          AJUMP(t);
+          continue;
+        }
+        c->cpsr |= T_BIT;
+        left -= 2 * (int32_t)cost;
+        r[15] = (t & ~1u) + 4;
+        if(left <= 0) goto out;
+        goto thumb_enter;
+      }
+      misc_a:   /* the instructions hidden among the register operations */
+        if(op & 0x60) {   /* 16-bit and signed loads, 16-bit stores */
+          const uint32_t rn = (op >> 16) & 15, rd = (op >> 12) & 15;
+          if(rd == 15 || rn == 15) goto slow_a;
+          const uint32_t by = (op & 0x00400000) ? ((op >> 4) & 0xf0) | (op & 15) : r[op & 15];
+          const uint32_t from = r[rn], moved = (op & 0x00800000) ? from + by : from - by;
+          const uint32_t addr = (op & 0x01000000) ? moved : from;
+          const bool wb = !(op & 0x01000000) || (op & 0x00200000);
+          if(op & 0x00100000) {
+            uint32_t v;
+            switch((op >> 5) & 3) {
+              case 1: RD16(addr, v); break;
+              case 2:
+                RD8(addr, v);
+                v = (uint32_t)(int8_t)v;
+                break;
+              default:
+                if(addr & 1) goto slow_a;
+                RD16(addr, v);
+                v = (uint32_t)(int16_t)v;
+                break;
+            }
+            if(wb) r[rn] = moved;
+            r[rd] = v;
+            left--;
+          } else {
+            if(((op >> 5) & 3) != 1) goto slow_a;
+            const uint32_t v = r[rd];
+            if(wb) r[rn] = moved;
+            WR16(addr, v);
+          }
+          continue;
+        }
+        if(!(op & 0x01c00000)) {   /* MUL, MLA */
+          uint32_t v = r[op & 15] * r[(op >> 8) & 15];
+          if(op & 0x00200000) v += r[(op >> 12) & 15];
+          r[(op >> 16) & 15] = v;
+          if(op & 0x00100000) setNZ(c, v);
+          left -= 2;
+          continue;
+        }
+        goto slow_a;
+      case 0x40 ... 0x7f: {   /* LDR, STR, LDRB, STRB */
+        const uint32_t rn = (op >> 16) & 15, rd = (op >> 12) & 15;
+        if(rd == 15) goto slow_a;
+        uint32_t by;
+        if(op & 0x02000000) {
+          if(op & 0x10) goto slow_a;
+          uint32_t unused;
+          by = r[op & 15];
+          if(op & 0xfe0) by = shiftImm(c, (int)((op >> 5) & 3), by, (op >> 7) & 31, &unused);
+        } else {
+          by = op & 0xfff;
+        }
+        const uint32_t from = r[rn], moved = (op & 0x00800000) ? from + by : from - by;
+        const uint32_t addr = (op & 0x01000000) ? moved : from;
+        const bool wb = !(op & 0x01000000) || (op & 0x00200000);
+        if(op & 0x00100000) {
+          uint32_t v;
+          if(op & 0x00400000) RD8(addr, v);
+          else RD32(addr, v);
+          if(wb) r[rn] = moved;
+          r[rd] = v;
+          left--;
+        } else {
+          const uint32_t v = r[rd];
+          if(wb) r[rn] = moved;
+          if(op & 0x00400000) WR8(addr, v);
+          else WR32(addr, v);
+        }
+        continue;
+      }
+      case 0x8b: {   /* LDMIA rn!, from a stack */
+        const uint32_t rn = (op >> 16) & 15;
+        const uint32_t list = op & 0xffff;
+        if(!list || rn == 15 || (list & (1u << rn))) goto slow_a;
+        const uint32_t n = (uint32_t)kPop8[list & 0xff] + kPop8[list >> 8];
+        const uint32_t a = r[rn];
+        if(!STACK_OK(a, n)) goto slow_a;
+        const uint8_t* p = g->iwR[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        r[rn] = a + 4 * n;
+        left -= (int32_t)n + 1;
+        uint32_t todo = list & 0x7fff;
+        while(todo) {
+          r[__builtin_ctz(todo)] = ld32(p);
+          todo &= todo - 1;
+          p += 4;
+        }
+        if(list & 0x8000) AJUMP(ld32(p));
+        continue;
+      }
+      case 0x92: {   /* STMDB rn!, onto a stack */
+        const uint32_t rn = (op >> 16) & 15;
+        uint32_t list = op & 0xffff;
+        if(!list || rn == 15 || (list & (0x8000u | (1u << rn)))) goto slow_a;
+        const uint32_t n = (uint32_t)kPop8[list & 0xff] + kPop8[list >> 8];
+        uint32_t a = r[rn] - 4 * n;
+        if(!STACK_OK(a, n)) goto slow_a;
+        uint8_t* p = g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        r[rn] = a;
+        left -= (int32_t)n;
+        while(list) {
+          const uint32_t v = r[__builtin_ctz(list)];
+          list &= list - 1;
+          g->dirty ^= (ld32(p) ^ v) * sigOf(a);
+          st32(p, v);
+          p += 4;
+          a += 4;
+        }
+        continue;
+      }
+      case 0xa0 ... 0xaf:
+        if(op & 0x00800000) IDLE_AT(pc8);
+        AJUMP(pc8 + (uint32_t)((int32_t)(op << 8) >> 6));
+        continue;
+      case 0xb0 ... 0xbf:
+        r[14] = pc8 - 4;
+        AJUMP(pc8 + (uint32_t)((int32_t)(op << 8) >> 6));
+        continue;
+      default:
+      slow_a:
+        SYNC_OUT();
+        armExec(g, op);
+        SYNC_IN();
+        if(r[15] != pc8 || (c->cpsr & T_BIT)) {   /* it jumped */
+          r[15] += 4;
+          if(left <= 0) goto out;
+          if(c->cpsr & T_BIT) goto thumb_enter;
+          if(g->codeLen != len) goto arm_enter;
+          off = r[15] - 8 - base;
+          continue;
+        }
+        if(left <= 0 || g->codeLen != len) goto resync_a;
+        continue;
     }
   }
+resync_a:
   r[15] = base + off + 8;
-  SYNC_OUT();
-}
+  if(left <= 0) goto out;
+  goto arm_enter;
+#undef RESYNC
+#undef AJUMP
 
-void cpu_run(Gba* g) {
-  while((int32_t)(g->target - g->cycles) > 0) {
-    if(g->cpu.cpsr & T_BIT) runThumb(g);
-    else runArm(g);
-  }
+out:
+  SYNC_OUT();
 }

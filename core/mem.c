@@ -34,7 +34,7 @@ void mem_waitcnt(Gba* g) {
 void mem_codePage(Gba* g, uint32_t a) {
   g->codeBase = a & ~(uint32_t)PG_MASK;
   g->codeLen = PG_SIZE;
-  g->codeCostT = g->codeCostA = 1;
+  g->codeCostT = g->codeCostA = g->codeCostL = 1;
   switch(a >> 24) {
     case 0:
       if(a < sizeof bios_stub) {
@@ -47,18 +47,20 @@ void mem_codePage(Gba* g, uint32_t a) {
     case 2:
       g->codePtr = g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)];
       g->codeCostT = 3;
-      g->codeCostA = 6;
+      g->codeCostA = g->codeCostL = 6;
       return;
     case 3:
       g->codePtr = g->iwR[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)];
       return;
-    case 8: case 9: case 10: case 11: case 12: case 13: {
-      const uint32_t off = a & 0x01ffffffu & ~(uint32_t)PG_MASK;
-      if(off + PG_SIZE > g->romSize) break;
+    case 8: case 9: case 10: case 11: case 12: case 13: {   /* the ROM, in one piece */
+      if((a & 0x01ffffffu) >= g->romSize) break;
       const int k = (int)((a >> 25) - 4);
-      g->codePtr = g->rom + off;
+      g->codePtr = g->rom;
+      g->codeBase = a & 0xfe000000u;
+      g->codeLen = g->romSize;
       g->codeCostT = g->romS[k];
       g->codeCostA = 2u * g->romS[k];
+      g->codeCostL = (uint32_t)g->romN[k] + g->romS[k];
       return;
     }
     default: break;

@@ -72,32 +72,49 @@ typedef struct GbaHost {
 } GbaHost;
 
 struct Gba {
+  /* what the CPU loop uses most comes first, close to the registers */
   Cpu cpu;
   uint32_t cycles, target;        /* the CPU runs while cycles < target */
-  bool halted;
-  bool intrWaiting;               /* inside IntrWait (bios.c) */
-  uint16_t intrMask;
-  /* where the code being run is */
+  /* where the code being run is: the whole ROM, or one page of RAM */
   const uint8_t* codePtr;
   uint32_t codeBase, codeLen;
   uint32_t codeCostT, codeCostA;  /* cycles to fetch a Thumb / an ARM instruction there */
+  uint32_t codeCostL;             /* and to read a word of data there */
+  /* waiting loops (cpu.c): a backward jump reached twice with the same
+   * registers and nothing written in between changes nothing until the
+   * next event, so the clock is moved there */
+  uint32_t dirty;                 /* signature of what memory writes changed since that jump: each
+                                     write adds (old ^ new) x a number made from its address, so
+                                     writes that put things back (push, pop, push again) cancel out */
+  uint32_t idleAddr;              /* the last backward jump taken */
+  uint8_t busy;                   /* something else happened since: I/O written, clock read, BIOS call */
+  uint8_t irqDepth, irqBusy;      /* interrupt handlers run aside: only what they change in memory counts
+                                     against the loop they interrupt (busy is put back when they return) */
+  uint8_t idleArmed, idleFails;
+  bool halted;
+  bool intrWaiting;               /* inside IntrWait (bios.c) */
+  uint16_t intrMask;
+  uint8_t romN[3], romS[3];       /* access cycles of the three ROM mirrors */
+  const uint8_t* rom;
+  uint32_t romSize;
+  uint32_t idleCycles;            /* cycles skipped (statistics) */
+  uint32_t instrs;                /* instructions run (statistics) */
 
-  /* memory */
-  const uint8_t* ewR[EWRAM_PAGES];
-  uint8_t* ewW[EWRAM_PAGES];
+  /* memory: a page read from may be anywhere (RAM, or a copy that cannot be
+   * written); a page that cannot be written has no write pointer. The fast
+   * RAM is always plain RAM. */
   const uint8_t* iwR[IWRAM_PAGES];
   uint8_t* iwW[IWRAM_PAGES];
+  const uint8_t* ewR[EWRAM_PAGES];
+  uint8_t* ewW[EWRAM_PAGES];
   const uint8_t* vrR[VRAM_PAGES];
   uint8_t* vrW[VRAM_PAGES];
   uint8_t pal[1024], oam[1024];
   uint16_t io[0x200];
-  const uint8_t* rom;
-  uint32_t romSize;
   uint8_t* save;                  /* 64 KB (SRAM or flash), or NULL */
   uint8_t saveType;               /* GBA_SAVE_... */
   bool saveDirty;
   uint8_t flashState, flashCmd, flashStep;
-  uint8_t romN[3], romS[3];       /* access cycles of the three ROM mirrors */
 
   Timer timer[4];
   uint32_t timerSync;             /* cycles when the timers were last brought up to date */
@@ -109,21 +126,8 @@ struct Gba {
   bool palDirty;
   bool render;                    /* draw this frame */
   uint32_t frame;
-  /* waiting loops (cpu.c): a backward jump reached twice with the same
-   * registers and nothing written in between changes nothing until the
-   * next event, so the clock is moved there */
-  uint32_t idleAddr;              /* the last backward jump taken */
-  uint32_t idleSnap[21];          /* registers and flags the time before */
+  uint32_t idleSnap[21];          /* waiting loops: registers and flags the time before */
   uint32_t idleReject[16];        /* jumps that turned out to be working loops */
-  uint8_t idleArmed, idleFails;
-  uint32_t dirty;                 /* signature of what memory writes changed since that jump: each
-                                     write adds (old ^ new) x a number made from its address, so
-                                     writes that put things back (push, pop, push again) cancel out */
-  uint8_t busy;                   /* something else happened since: I/O written, clock read, BIOS call */
-  uint8_t irqDepth, irqBusy;      /* interrupt handlers run aside: only what they change in memory counts
-                                     against the loop they interrupt (busy is put back when they return) */
-  uint32_t idleCycles;            /* cycles skipped (statistics) */
-  uint32_t instrs;                /* instructions run (statistics) */
   GbaHost host;
 };
 

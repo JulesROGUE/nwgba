@@ -82,6 +82,10 @@ static void line(void* user, int y, const uint16_t* px) {
   checksum = checksum * 31 + px[(y * 7) % GBA_W];
 }
 
+/* places a profiler can recognize (tools/qprof): the measured stretch starts and ends here */
+__attribute__((noinline, used)) void bench_mark_start(void) { __asm__ volatile("nop"); }
+__attribute__((noinline, used)) void bench_mark_stop(void) { __asm__ volatile("nop"); }
+
 /* drawEvery: 1 = every frame, 0 = never, n = one frame out of n */
 static void run(uint32_t drawEvery, const char* label) {
   const GbaHost host = {0, line, 0};
@@ -93,6 +97,7 @@ static void run(uint32_t drawEvery, const char* label) {
   uint32_t i0 = 0;
   for(uint32_t f = 0; f < BENCH_SKIP + BENCH_FRAMES; f++) {
     if(f == BENCH_SKIP) {
+      bench_mark_start();
       t0 = ticks();
       i0 = g.instrs;
     }
@@ -104,6 +109,7 @@ static void run(uint32_t drawEvery, const char* label) {
     if(f >= BENCH_SKIP && d > worst) worst = d;
   }
   const uint64_t t = ticks() - t0;
+  bench_mark_stop();
   out("rom ");
   outNum(bench_rom_size);
   out(" bytes, first word ");
@@ -123,7 +129,9 @@ static void run(uint32_t drawEvery, const char* label) {
 
 int main(void) {
   clockStart();
-#ifdef BENCH_ONE
+#if defined(BENCH_ONE) && BENCH_ONE == 0
+  run(0, "drawing nothing");
+#elif defined(BENCH_ONE)
   run(1, "drawing every frame");
 #else
   run(1, "drawing every frame");

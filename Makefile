@@ -21,6 +21,8 @@ clean:
 
 # ---- instruction count on an emulated Cortex-M7 (see bench/main.c) --------
 #   make bench ROM=game.gba [FRAMES=600] [SKIP=0] [KEYS="300:S 420:A"]
+#   make profile ...the same... [DRAW=1] [FUNC=name]   where the instructions go
+#     (tools/qprof, a QEMU plugin; FUNC: also list that function's machine code)
 ARM_CC ?= arm-none-eabi-gcc
 FRAMES ?= 600
 SKIP ?= 0
@@ -28,11 +30,20 @@ KEYS ?=
 BENCH_CFLAGS = -std=c11 -O2 -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
   -fdata-sections -ffunction-sections -flto -DNWGBA_CALC \
   -DBENCH_FRAMES=$(FRAMES) -DBENCH_SKIP=$(SKIP) '-DBENCH_KEYS="$(KEYS)"' $(BENCH_DEFS)
-.PHONY: bench
-bench: $(CORE) bench/main.c bench/startup.c bench/mps2.ld $(HEADERS) | $(BUILD)
+QEMU = qemu-system-arm -M mps2-an500 -cpu cortex-m7 -nographic -monitor none -serial none \
+  -icount shift=0 -semihosting-config enable=on,target=native
+.PHONY: bench bench-elf profile
+bench-elf: $(CORE) bench/main.c bench/startup.c bench/mps2.ld $(HEADERS) | $(BUILD)
 	@test -n "$(ROM)" || (echo "usage: make bench ROM=game.gba"; exit 1)
 	printf '.section .game,"a"\n.global bench_rom\n.balign 4\nbench_rom:\n.incbin "%s"\nbench_rom_end:\n.section .rodata\n.global bench_rom_size\n.balign 4\nbench_rom_size:\n.word bench_rom_end - bench_rom\n' "$(ROM)" > $(BUILD)/bench_rom.S
 	$(ARM_CC) $(BENCH_CFLAGS) $(CORE) bench/main.c bench/startup.c $(BUILD)/bench_rom.S \
 	  -nostartfiles --specs=nano.specs --specs=nosys.specs -Wl,--gc-sections -T bench/mps2.ld -o $(BUILD)/bench.elf
-	qemu-system-arm -M mps2-an500 -cpu cortex-m7 -nographic -monitor none -serial none \
-	  -icount shift=0 -semihosting-config enable=on,target=native -kernel $(BUILD)/bench.elf
+bench: bench-elf
+	$(QEMU) -kernel $(BUILD)/bench.elf
+$(BUILD)/qprof.so: tools/qprof/qprof.c | $(BUILD)
+	gcc -O2 -fPIC -shared -o $@ $<
+profile: BENCH_DEFS += -DBENCH_ONE=$(if $(DRAW),1,0)
+profile: bench-elf $(BUILD)/qprof.so
+	$(QEMU) -plugin $(BUILD)/qprof.so,start=$$(arm-none-eabi-nm $(BUILD)/bench.elf | awk '/bench_mark_start/{print $$1}'),stop=$$(arm-none-eabi-nm $(BUILD)/bench.elf | awk '/bench_mark_stop/{print $$1}'),out=$(BUILD)/qprof.out \
+	  -kernel $(BUILD)/bench.elf
+	python3 tools/qprof/report.py $(BUILD)/bench.elf $(BUILD)/qprof.out $(FRAMES) $(FUNC)
