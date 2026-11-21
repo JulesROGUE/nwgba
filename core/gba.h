@@ -116,6 +116,8 @@ struct Gba {
    * length minus 3, so that 4 bytes can be read anywhere below it) */
   const uint8_t* romPtr;
   uint32_t romBase, romLen;
+  const uint8_t* rom2Ptr;         /* and the one before */
+  uint32_t rom2Base, rom2Len;
   uint32_t romSize;
   uint8_t* iwram;                 /* the fast RAM, 32 KB */
   uint32_t idleCycles;            /* cycles skipped (statistics) */
@@ -140,6 +142,7 @@ struct Gba {
 
   Timer timer[4];
   uint32_t timerSync;             /* cycles when the timers were last brought up to date */
+  uint32_t timerDue;              /* and when they next need it: an overflow that raises an interrupt */
   Dma dma[4];
   int32_t bgRefX[2], bgRefY[2];   /* reference points of the affine backgrounds, moving down the frame */
   uint16_t keys;                  /* pressed buttons */
@@ -206,7 +209,7 @@ uint8_t* mem_frame(Gba* g, const uint8_t** slot, uint8_t* state);
 uint32_t mem_cost(const Gba* g, uint32_t a, bool wide);
 void mem_waitcnt(Gba* g);
 void timers_sync(Gba* g);
-uint32_t timers_next(Gba* g);            /* cycles until a timer needs attention */
+void timers_plan(Gba* g);                /* sets timerDue; after a sync or a change of the timers */
 void dma_trigger(Gba* g, int timing);    /* 1 vertical blank, 2 horizontal blank */
 
 /* ppu.c */

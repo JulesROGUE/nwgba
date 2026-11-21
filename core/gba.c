@@ -57,16 +57,18 @@ static void run(Gba* g, uint32_t n) {
   const uint32_t end = g->cycles + n;
   while((int32_t)(end - g->cycles) > 0) {
     checkIrq(g);
-    uint32_t stop = end;
-    const uint32_t t = timers_next(g);
-    if(t < end - g->cycles) stop = g->cycles + t;
+    /* up to the end of the stretch, or to the moment a timer wants an interrupt */
+    const uint32_t stop = (int32_t)(g->timerDue - end) < 0 ? g->timerDue : end;
     if(g->halted) {
-      g->cycles = stop;
+      if((int32_t)(stop - g->cycles) > 0) g->cycles = stop;
     } else {
       g->target = stop;
       cpu_run(g);
     }
-    timers_sync(g);
+    if((int32_t)(g->timerDue - g->cycles) <= 0) {
+      timers_sync(g);
+      timers_plan(g);
+    }
   }
 }
 

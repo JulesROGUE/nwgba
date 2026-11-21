@@ -59,11 +59,25 @@ static const uint8_t* romOther(Gba* g, uint32_t page) {
  * (past the end, or across two pieces) */
 static const uint8_t* romSlow(Gba* g, uint32_t off, uint32_t n) {
   if(off >= g->romSize) return NULL;
+  if(off - g->rom2Base < g->rom2Len) {   /* the stretch before the last: games go back and forth between two */
+    const uint8_t* const p = g->rom2Ptr;
+    const uint32_t b = g->rom2Base, l = g->rom2Len;
+    g->rom2Ptr = g->romPtr;
+    g->rom2Base = g->romBase;
+    g->rom2Len = g->romLen;
+    g->romPtr = p;
+    g->romBase = b;
+    g->romLen = l;
+    return p + (off - b);
+  }
   uint32_t first, pages;
   const uint8_t* run = pack_run(&g->pack, off >> PG_SHIFT, &first, &pages);
   if(run) {
     const uint32_t base = first << PG_SHIFT, len = pages << PG_SHIFT;
     if(len > 3) {
+      g->rom2Ptr = g->romPtr;
+      g->rom2Base = g->romBase;
+      g->rom2Len = g->romLen;
       g->romPtr = run;
       g->romBase = base;
       g->romLen = len - 3;
@@ -173,7 +187,8 @@ void timers_sync(Gba* g) {
   }
 }
 
-uint32_t timers_next(Gba* g) {
+/* cycles until a timer needs looking at: an overflow that raises an interrupt */
+static uint32_t timersNext(const Gba* g) {
   uint32_t next = 0x7fffffff;
   bool wanted = false;
   for(int i = 0; i < 4; i++) wanted |= (g->timer[i].ctrl & 0xc0) == 0xc0;
@@ -186,6 +201,10 @@ uint32_t timers_next(Gba* g) {
     if(left < next) next = left;
   }
   return next ? next : 1;
+}
+
+void timers_plan(Gba* g) {
+  g->timerDue = g->timerSync + timersNext(g);
 }
 
 /* ----------------------------------------------------------------- DMA -- */
@@ -286,6 +305,7 @@ static void ioWrite(Gba* g, uint32_t a, uint32_t v) {   /* a: even offset, v: 16
       timers_sync(g);
       g->timer[(a - 0x100) >> 2].reload = (uint16_t)v;
       *reg = (uint16_t)v;
+      timers_plan(g);
       return;
     case 0x102: case 0x106: case 0x10a: case 0x10e: {
       timers_sync(g);
@@ -296,6 +316,7 @@ static void ioWrite(Gba* g, uint32_t a, uint32_t v) {   /* a: even offset, v: 16
       }
       t->ctrl = (uint16_t)(v & 0xc7);
       *reg = t->ctrl;
+      timers_plan(g);
       gba_poke(g);
       return;
     }
@@ -850,12 +871,14 @@ void mem_reset(Gba* g) {
   for(uint32_t i = g->nFrames; i > 1; i--) g->freeFrames[g->nFree++] = (uint16_t)(i - 1);
   g->lowFree = g->nFree;
   g->outOfMemory = false;
-  g->romLen = 0;
+  g->romLen = g->rom2Len = 0;
   g->io[REG_DISPCNT >> 1] = 0x0080;
   g->io[REG_BG2PA >> 1] = g->io[(REG_BG2PA + 6) >> 1] = 0x100;
   g->io[REG_BG3PA >> 1] = g->io[(REG_BG3PA + 6) >> 1] = 0x100;
   g->io[0x88 >> 1] = 0x200;        /* SOUNDBIAS */
   g->io[REG_POSTFLG >> 1] = 1;
   g->palDirty = g->oamDirty = true;
+  g->timerSync = g->cycles;
+  timers_plan(g);
   mem_waitcnt(g);
 }

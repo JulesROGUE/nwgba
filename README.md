@@ -2,7 +2,7 @@
 
 Un émulateur **Game Boy Advance** taillé pour la calculatrice **NumWorks** (N0110), dans la lignée de [nwsnes](https://github.com/JulesROGUE/nwsnes). Sans son, et sans fichier BIOS : les fonctions du BIOS que les jeux appellent sont réécrites ici.
 
-> **État : premier essai sur calculatrice à faire.** Sur PC, le cœur fait tourner un jeu du commerce (Advance Wars) jusque dans une carte de bataille, avec la mémoire de la calculatrice. L'appli et l'installateur existent et passent leurs tests sur des doublures de la calculatrice ; rien n'a encore été vu sur une vraie. D'après les mesures, le jeu devrait tourner à sa vitesse en ne dessinant qu'une image sur trois ou quatre (voir « Vitesse »).
+> **État : premier essai sur calculatrice à faire.** Sur PC, le cœur fait tourner un jeu du commerce (Advance Wars) jusque dans une carte de bataille, avec la mémoire de la calculatrice. L'appli et l'installateur existent et passent leurs tests sur des doublures de la calculatrice ; rien n'a encore été vu sur une vraie. D'après les mesures, le jeu devrait tourner à peu près à sa vitesse (voir « Vitesse ») ; la calculatrice dira si c'est vrai.
 
 ## Ce dépôt ne contient aucun jeu
 
@@ -41,17 +41,18 @@ Advance Wars, dans une carte de bataille :
 
 | Instructions par image | au départ | maintenant |
 |---|---|---|
-| sans dessiner | 4,7 millions | 2,3 millions |
-| en dessinant une image sur trois | 5,4 millions | 3,0 millions |
-| en dessinant chaque image | 6,8 millions | 4,4 millions |
+| sans dessiner | 4,7 millions | 2,0 millions |
+| en dessinant une image sur trois | 5,4 millions | 2,3 millions |
+| en dessinant chaque image | 6,8 millions | 3,0 millions |
 
 Ce qui a compté :
 
 - **les boucles d'attente sont sautées** : un saut en arrière repris avec les mêmes registres et rien d'écrit entre-temps ne changera rien avant le prochain événement, l'horloge y va directement. Y compris quand le jeu prend une interruption à chaque ligne de l'image ;
 - **le mixeur de son est sauté** : le pilote de son de la plupart des jeux (« MP2K ») mélange ses voix avec une routine qu'il copie en mémoire ; sa boucle est court-circuitée au passage ;
-- **la boucle de l'interprète** garde sa place et son horloge dans des registres, fait les instructions courantes sur place, et ne regarde l'heure qu'aux sauts.
+- **la boucle de l'interprète** garde sa place et son horloge dans des registres, fait les instructions courantes sur place, et ne regarde l'heure qu'aux sauts ;
+- **le dessin** ne va chercher qu'une fois par ligne la rangée de la carte, ne relit pas une tuile identique à la précédente, écrit d'un bloc les tuiles sans pixel transparent, et ne cherche les sprites visibles que quand leur table change.
 
-Ce qui reste à gagner : le dessin (pas encore optimisé), et un interprète écrit en assembleur.
+Ce qui reste à gagner : un interprète écrit en assembleur (aujourd'hui une trentaine d'instructions de la calculatrice par instruction du jeu).
 
 `make profile` dit où passent les instructions, fonction par fonction et ligne par ligne (`tools/qprof`, un greffon QEMU).
 
