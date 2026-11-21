@@ -25,17 +25,21 @@ void gba_logf(Gba* g, const char* fmt, ...) {
 }
 #endif
 
-void gba_init(Gba* g, const GbaHost* host, const uint8_t* rom, uint32_t romSize, uint8_t* ram, uint8_t* save) {
+void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint32_t memBytes, uint8_t* save) {
   memset(g, 0, sizeof *g);
   g->host = *host;
-  g->rom = rom;
-  g->romSize = romSize;
+  g->pack = *pack;
+  g->romSize = pack->romSize;
+  g->saveType = (uint8_t)pack->saveType;
   g->save = save;
-  for(int i = 0; i < EWRAM_PAGES; i++) g->ewR[i] = g->ewW[i] = ram + i * PG_SIZE;
-  ram += EWRAM_PAGES * PG_SIZE;
-  for(int i = 0; i < IWRAM_PAGES; i++) g->iwR[i] = g->iwW[i] = ram + i * PG_SIZE;
-  ram += IWRAM_PAGES * PG_SIZE;
-  for(int i = 0; i < VRAM_PAGES; i++) g->vrR[i] = g->vrW[i] = ram + i * PG_SIZE;
+  /* the memory given: the fast RAM, then the list of free frames, then the frames */
+  g->iwram = mem;
+  mem += IWRAM_SIZE;
+  memBytes -= IWRAM_SIZE;
+  g->nFrames = memBytes / GBA_FRAME_COST;
+  if(g->nFrames > EWRAM_PAGES + VRAM_PAGES + 1) g->nFrames = EWRAM_PAGES + VRAM_PAGES + 1;
+  g->freeFrames = (uint16_t*)(void*)mem;
+  g->frames = mem + ((g->nFrames * 2 + 3) & ~3u);
   mem_reset(g);
   cpu_reset(g);
   g->render = true;

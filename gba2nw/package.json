@@ -1,0 +1,13 @@
+{
+  "name": "gba2nw",
+  "version": "0.1.0",
+  "description": "Prépare un jeu Game Boy Advance pour la calculatrice NumWorks (appli nwgba) et l'installe",
+  "license": "MIT",
+  "bin": {
+    "gba2nw": "bin/gba2nw.js"
+  },
+  "files": ["bin", "lib", "runtime", "README.md"],
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,7 +1,10 @@
 /*
  * nwgba-host - runs a game on a PC and writes pictures of the screen.
  *
- *   nwgba-host GAME.gba [--frames N] [--dump DIR] [--every K] [--keys "F:KEYS ..."] [--hash N]
+ *   nwgba-host GAME.gba|GAME.pack [--frames N] [--dump DIR] [--every K] [--keys "F:KEYS ..."] [--hash N] [--ram KB]
+ *
+ * --ram: the memory for the fast RAM and the pages, as on the calculator
+ * (default: enough for every page to be real RAM).
  *
  * --keys: at frame F, hold KEYS for 6 frames (or "F:KEYS*N" for N frames).
  * Keys: A B s (select) S (start) r l u d R L.
@@ -39,10 +42,10 @@ static void shot(const Host* h, const char* dir, int n) {
 
 int main(int argc, char** argv) {
   if(argc < 2) {
-    fprintf(stderr, "usage: nwgba-host GAME.gba [--frames N] [--dump DIR] [--every K] [--keys \"F:KEYS ...\"]\n");
+    fprintf(stderr, "usage: nwgba-host GAME.gba|GAME.pack [--frames N] [--dump DIR] [--every K] [--keys \"F:KEYS ...\"] [--hash N] [--ram KB]\n");
     return 1;
   }
-  int frames = 600, every = 60, hashEvery = 0;
+  int frames = 600, every = 60, hashEvery = 0, ramKb = 0;
   const char* dump = NULL;
   const char* keys = NULL;
   for(int i = 2; i < argc; i++) {
@@ -51,6 +54,7 @@ int main(int argc, char** argv) {
     else if(!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
     else if(!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
     else if(!strcmp(argv[i], "--hash") && i + 1 < argc) hashEvery = atoi(argv[++i]);   /* prints a checksum of the picture every N frames */
+    else if(!strcmp(argv[i], "--ram") && i + 1 < argc) ramKb = atoi(argv[++i]);
   }
   FILE* f = fopen(argv[1], "rb");
   if(!f) {
@@ -60,24 +64,39 @@ int main(int argc, char** argv) {
   fseek(f, 0, SEEK_END);
   const long n = ftell(f);
   fseek(f, 0, SEEK_SET);
-  const uint32_t romSize = ((uint32_t)n + PG_MASK) & ~(uint32_t)PG_MASK;
-  uint8_t* rom = calloc(1, romSize);
-  if(fread(rom, 1, (size_t)n, f) != (size_t)n) return 1;
+  const uint32_t size = ((uint32_t)n + PG_MASK) & ~(uint32_t)PG_MASK;
+  uint8_t* file = calloc(1, size + 4);
+  if(fread(file, 1, (size_t)n, f) != (size_t)n) return 1;
   fclose(f);
+  /* a pack made by gba2nw (both parts one after the other), or a ROM as it is */
+  Pack pack;
+  if(pack_open(&pack, file, (uint32_t)n)) {
+    if(pack.size1 + pack.size2 != (uint32_t)n || (pack.size2 && pack_fnv1a(file + pack.size1, pack.size2) != pack.sum2)) {
+      fprintf(stderr, "%s: damaged pack\n", argv[1]);
+      return 1;
+    }
+    pack_second(&pack, file + pack.size1);
+  } else {
+    pack_plain(&pack, file, size, malloc(size / PG_SIZE * 2));
+    for(uint32_t i = 0; i + 8 < size; i += 4) {   /* the kind of save memory, from the name of the library the game was built with */
+      if(!memcmp(file + i, "FLASH", 5)) pack.saveType = GBA_SAVE_FLASH;
+      else if(!memcmp(file + i, "SRAM_V", 6)) pack.saveType = GBA_SAVE_SRAM;
+      else if(!memcmp(file + i, "EEPROM_V", 8)) pack.saveType = GBA_SAVE_EEPROM;
+    }
+  }
 
   static Host h;
   static Gba g;
-  uint8_t* ram = calloc(EWRAM_PAGES + IWRAM_PAGES + VRAM_PAGES, PG_SIZE);
+  const uint32_t memBytes = ramKb ? (uint32_t)ramKb * 1024 : GBA_MEM_ALL;
+  if(memBytes < GBA_MEM_MIN) {
+    fprintf(stderr, "--ram: at least %u KB\n", (unsigned)(GBA_MEM_MIN + 1023) / 1024);
+    return 1;
+  }
+  uint8_t* mem = calloc(1, memBytes);
   uint8_t* save = malloc(0x10000);
   memset(save, 0xff, 0x10000);
   const GbaHost host = {&h, hostLine, hostLog};
-  gba_init(&g, &host, rom, romSize, ram, save);
-  /* the kind of save memory, from the name of the library the game was built with */
-  for(uint32_t i = 0; i + 8 < romSize; i += 4) {
-    if(!memcmp(rom + i, "FLASH", 5)) g.saveType = GBA_SAVE_FLASH;
-    else if(!memcmp(rom + i, "SRAM_V", 6)) g.saveType = GBA_SAVE_SRAM;
-    else if(!memcmp(rom + i, "EEPROM_V", 8)) g.saveType = GBA_SAVE_EEPROM;
-  }
+  gba_init(&g, &host, &pack, mem, memBytes, save);
   uint64_t instrs = 0, busiest = 0, idle = 0;
   for(int i = 0; i < frames; i++) {
     g.keys = scriptKeys(keys, (uint32_t)i);
@@ -87,6 +106,11 @@ int main(int argc, char** argv) {
     idle += g.idleCycles;
     g.idleCycles = 0;
     if(g.instrs > busiest) busiest = g.instrs;
+    if(g.outOfMemory) {
+      fprintf(stderr, "frame %d: out of memory\n", i + 1);
+      frames = i + 1;
+      break;
+    }
     if(dump && every && i % every == every - 1) shot(&h, dump, i + 1);
     if(hashEvery && i % hashEvery == hashEvery - 1) {
       uint32_t x = 2166136261u;
@@ -102,5 +126,9 @@ int main(int argc, char** argv) {
   fprintf(stderr, "%d frames; pc %08x; instructions per frame: %llu on average, %llu at most; %llu%% of the time skipped in waiting loops\n",
           frames, (unsigned)g.cpu.r[15], (unsigned long long)(instrs / (uint64_t)(frames ? frames : 1)), (unsigned long long)busiest,
           (unsigned long long)(idle * 100 / (280896ull * (uint64_t)(frames ? frames : 1))));
-  return 0;
+  fprintf(stderr, "real RAM for pages: %u KB used at most, of %u KB",
+          (unsigned)((g.nFrames - 1 - g.lowFree) * PG_SIZE / 1024), (unsigned)((g.nFrames - 1) * PG_SIZE / 1024));
+  if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);
+  fprintf(stderr, "\n");
+  return g.outOfMemory ? 2 : 0;
 }

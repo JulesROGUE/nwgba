@@ -2,10 +2,21 @@
  * nwgba - a Game Boy Advance core cut for the NumWorks calculator.
  *
  * The calculator leaves 149 KB of RAM to an app; a GBA has 384 KB (256 KB of
- * work RAM on the board, 32 KB in the processor, 96 KB of video RAM). So
- * these three are made of 1 KB pages reached through tables of pointers: a
- * page can be real RAM, or (later, on the calculator) read-only data in the
- * game pack until the game writes to it.
+ * work RAM on the board, 32 KB in the processor, 96 KB of video RAM), and
+ * most games fill a good part of it. But much of what they put there never
+ * changes once loaded: pictures and tables decompressed from the ROM. So the
+ * work RAM and the video RAM are made of 256-byte pages, and a page is one
+ * of three things:
+ *  - nothing: it reads as zeros and takes no memory;
+ *  - fixed: it reads straight from the game pack, where the PC tool put the
+ *    ROM's compressed blocks already decompressed (pack.h). When the game
+ *    asks for a block to be decompressed somewhere, or copies memory that is
+ *    itself fixed, the pages concerned just point at the data;
+ *  - real RAM, one of a pool of frames, taken the first time the game writes
+ *    something different to the page.
+ * The fast RAM (32 KB) is always real. The calculator cannot write its flash
+ * while an app runs, so there is nowhere to put a page aside: a game that
+ * needs more real RAM than there are frames cannot run.
  *
  * No sound. No BIOS file: the functions games call are written here (bios.c).
  */
@@ -16,15 +27,20 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "pack.h"
+
 #define GBA_W 240
 #define GBA_H 160
 
-#define PG_SHIFT 10
+#define PG_SHIFT 8
 #define PG_SIZE (1 << PG_SHIFT)
 #define PG_MASK (PG_SIZE - 1)
-#define EWRAM_PAGES 256
-#define IWRAM_PAGES 32
-#define VRAM_PAGES 96
+#define EWRAM_PAGES 1024
+#define VRAM_PAGES 384
+#define IWRAM_SIZE 0x8000u
+#define IWRAM_MASK (IWRAM_SIZE - 1)
+/* what a page of the two big RAMs is */
+enum { PG_ZERO, PG_FIXED, PG_RAM };
 
 /* buttons, as in KEYINPUT (1 = pressed here) */
 enum {
@@ -95,20 +111,26 @@ struct Gba {
   bool intrWaiting;               /* inside IntrWait (bios.c) */
   uint16_t intrMask;
   uint8_t romN[3], romS[3];       /* access cycles of the three ROM mirrors */
-  const uint8_t* rom;
+  /* the stretch of ROM last read as data, stored in one piece (romLen: its
+   * length minus 3, so that 4 bytes can be read anywhere below it) */
+  const uint8_t* romPtr;
+  uint32_t romBase, romLen;
   uint32_t romSize;
+  uint8_t* iwram;                 /* the fast RAM, 32 KB */
   uint32_t idleCycles;            /* cycles skipped (statistics) */
   uint32_t instrs;                /* instructions run (statistics) */
 
-  /* memory: a page read from may be anywhere (RAM, or a copy that cannot be
-   * written); a page that cannot be written has no write pointer. The fast
-   * RAM is always plain RAM. */
-  const uint8_t* iwR[IWRAM_PAGES];
-  uint8_t* iwW[IWRAM_PAGES];
+  /* the pages of the two big RAMs: where each reads from, and what it is (PG_...) */
   const uint8_t* ewR[EWRAM_PAGES];
-  uint8_t* ewW[EWRAM_PAGES];
   const uint8_t* vrR[VRAM_PAGES];
-  uint8_t* vrW[VRAM_PAGES];
+  uint8_t ewS[EWRAM_PAGES], vrS[VRAM_PAGES];
+  /* the frames: real RAM for pages */
+  uint8_t* frames;
+  uint16_t* freeFrames;           /* the free ones, a stack */
+  uint32_t nFrames, nFree, lowFree;   /* lowFree: the fewest ever free */
+  bool outOfMemory;               /* a page needed a frame and there was none: the game cannot go on */
+  uint32_t leftOutReads;          /* reads of ROM pages the pack left out */
+  Pack pack;
   uint8_t pal[1024], oam[1024];
   uint16_t io[0x200];
   uint8_t* save;                  /* 64 KB (SRAM or flash), or NULL */
@@ -132,9 +154,13 @@ struct Gba {
 };
 
 /* gba.c */
-/* ram: EWRAM_PAGES + IWRAM_PAGES + VRAM_PAGES pages (PC builds: all of the
- * console's memory as real RAM); save: 64 KB or NULL */
-void gba_init(Gba* g, const GbaHost* host, const uint8_t* rom, uint32_t romSize, uint8_t* ram, uint8_t* save);
+/* pack: the game (copied); mem: memBytes of RAM for the fast RAM and the
+ * frames, 4-aligned (at least GBA_MEM_MIN; GBA_MEM_ALL makes every page
+ * real); save: 64 KB or NULL */
+#define GBA_FRAME_COST (PG_SIZE + 2u)
+#define GBA_MEM_MIN (IWRAM_SIZE + 64u * GBA_FRAME_COST)
+#define GBA_MEM_ALL (IWRAM_SIZE + (EWRAM_PAGES + VRAM_PAGES + 1u) * GBA_FRAME_COST)
+void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint32_t memBytes, uint8_t* save);
 void gba_runFrame(Gba* g);
 void gba_raiseIrq(Gba* g, uint32_t bits);
 /* something that decides whether an interrupt is taken changed: the CPU loop stops to look */
@@ -159,6 +185,19 @@ void mem_w32(Gba* g, uint32_t a, uint32_t v);
 void mem_poke8(Gba* g, uint32_t a, uint32_t v);
 void mem_codePage(Gba* g, uint32_t a);
 void mem_reset(Gba* g);
+/* blocks of memory at once, a page at a time; the cost in cycles is the
+ * caller's business. Pages of the big RAMs wholly covered by data that never
+ * changes are not copied: they point at it.
+ * n bytes from src to dst, as units of 2 or 4 bytes going up: */
+void mem_copy(Gba* g, uint32_t src, uint32_t dst, uint32_t n, uint32_t unit);
+/* count units of value at dst */
+void mem_fill(Gba* g, uint32_t dst, uint32_t value, uint32_t count, uint32_t unit);
+/* n bytes of data that never changes (the pack's) to dst */
+void mem_load(Gba* g, uint32_t dst, const uint8_t* data, uint32_t n);
+/* the frame of a page being written to for the first time (slot, state: the page's entries) */
+uint8_t* mem_frame(Gba* g, const uint8_t** slot, uint8_t* state);
+/* the cycles of one access of 2 (wide false) or 4 bytes at a */
+uint32_t mem_cost(const Gba* g, uint32_t a, bool wide);
 void mem_waitcnt(Gba* g);
 void timers_sync(Gba* g);
 uint32_t timers_next(Gba* g);            /* cycles until a timer needs attention */

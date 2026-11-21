@@ -849,24 +849,25 @@ static void thumbExec(Gba* g, uint32_t op) {
 #define B6(n) B4(n), B4(n + 1), B4(n + 1), B4(n + 2)
 static const uint8_t kPop8[256] = {B6(0), B6(1), B6(1), B6(2)};   /* bits set in a byte */
 
-/* reading: the fast RAM, the ROM, the slow RAM, else through mem.c */
-#define RD(bits, addr, dst, mask, costE, costR)                                                  \
-  do {                                                                                           \
-    const uint32_t a_ = (addr);                                                                  \
-    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                           \
-      dst = ld##bits(g->iwR[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK));             \
-      left -= 1;                                                                                 \
-    } else if((a_ & (0xfe000000u | (mask))) == 0x08000000u && (a_ & 0x01ffffffu) < g->romSize) { \
-      dst = ld##bits(g->rom + (a_ & 0x01ffffffu));                                               \
-      left -= (int32_t)(costR);                                                                  \
-    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                    \
-      dst = ld##bits(g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK));             \
-      left -= (costE);                                                                           \
-    } else {                                                                                     \
-      SYNC_OUT();                                                                                \
-      dst = slow##bits(g, a_);                                                                   \
-      SYNC_IN();                                                                                 \
-    }                                                                                            \
+/* reading: the fast RAM, the ROM (the stretch of it read last), the slow
+ * RAM, else through mem.c */
+#define RD(bits, addr, dst, mask, costE, costR)                                              \
+  do {                                                                                       \
+    const uint32_t a_ = (addr);                                                              \
+    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                       \
+      dst = ld##bits(g->iwram + (a_ & IWRAM_MASK));                                          \
+      left -= 1;                                                                             \
+    } else if((a_ & (0xfe000000u | (mask))) == 0x08000000u && (a_ & 0x01ffffffu) - g->romBase < g->romLen) { \
+      dst = ld##bits(g->romPtr + ((a_ & 0x01ffffffu) - g->romBase));                         \
+      left -= (int32_t)(costR);                                                              \
+    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                \
+      dst = ld##bits(g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK));         \
+      left -= (costE);                                                                       \
+    } else {                                                                                 \
+      SYNC_OUT();                                                                            \
+      dst = slow##bits(g, a_);                                                               \
+      SYNC_IN();                                                                             \
+    }                                                                                        \
   } while(0)
 #define ld8(p) (*(const uint8_t*)(p))
 #define slow8(g, a) mem_r8(g, a)
@@ -876,36 +877,37 @@ static const uint8_t kPop8[256] = {B6(0), B6(1), B6(1), B6(2)};   /* bits set in
 #define RD16(addr, dst) RD(16, addr, dst, 1u, 3, g->romN[0])
 #define RD32(addr, dst) RD(32, addr, dst, 3u, 6, g->romN[0] + g->romS[0])
 
-/* writing: the two RAMs, else through mem.c; that may end the slice or move
- * the code (RESYNC), so anything else the instruction does comes before */
-#define WR(bits, addr, val, mask, costE)                                                        \
-  do {                                                                                          \
-    const uint32_t a_ = (addr), v_ = (val);                                                     \
-    uint8_t* p_;                                                                                \
-    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                          \
-      p_ = g->iwW[(a_ >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a_ & PG_MASK);                       \
-      left -= 1;                                                                                \
-    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u &&                                   \
-              (p_ = g->ewW[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)]) != NULL) {                    \
-      p_ += a_ & PG_MASK;                                                                       \
-      left -= (costE);                                                                          \
-    } else {                                                                                    \
-      SYNC_OUT();                                                                               \
-      mem_w##bits(g, a_ & ~(uint32_t)(mask), v_);                                               \
-      SYNC_IN();                                                                                \
-      if(left <= 0 || g->codeLen != len) goto RESYNC;                                           \
-      break;                                                                                    \
-    }                                                                                           \
-    g->dirty ^= (ld##bits(p_) ^ (v_ & (uint32_t)(0xffffffffu >> (32 - bits)))) * sigOf(a_);     \
-    st##bits(p_, v_);                                                                           \
+/* writing: the fast RAM, the pages of the slow RAM that are real RAM, else
+ * through mem.c; that may end the slice or move the code (RESYNC), so
+ * anything else the instruction does comes before */
+#define WR(bits, addr, val, mask, costE)                                                     \
+  do {                                                                                       \
+    const uint32_t a_ = (addr), v_ = (val);                                                  \
+    uint8_t* p_;                                                                             \
+    if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                       \
+      p_ = g->iwram + (a_ & IWRAM_MASK);                                                     \
+      left -= 1;                                                                             \
+    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u &&                                \
+              g->ewS[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] == PG_RAM) {                      \
+      p_ = (uint8_t*)g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK);          \
+      left -= (costE);                                                                       \
+    } else {                                                                                 \
+      SYNC_OUT();                                                                            \
+      mem_w##bits(g, a_ & ~(uint32_t)(mask), v_);                                            \
+      SYNC_IN();                                                                             \
+      if(left <= 0 || g->codeLen != len) goto RESYNC;                                        \
+      break;                                                                                 \
+    }                                                                                        \
+    g->dirty ^= (ld##bits(p_) ^ (v_ & (uint32_t)(0xffffffffu >> (32 - bits)))) * sigOf(a_);  \
+    st##bits(p_, v_);                                                                        \
   } while(0)
 #define st8(p, v) (*(uint8_t*)(p) = (uint8_t)(v))
 #define WR8(addr, val) WR(8, addr, val, 0u, 3)
 #define WR16(addr, val) WR(16, addr, val, 1u, 3)
 #define WR32(addr, val) WR(32, addr, val, 3u, 6)
 
-/* a stack of n words at a, all in one page of the fast RAM? */
-#define STACK_OK(a, n) (((a) & 0xff000003u) == 0x03000000u && ((a) & PG_MASK) + 4 * (n) <= PG_SIZE)
+/* a stack of n words at a, all in the fast RAM? */
+#define STACK_OK(a, n) (((a) & 0xff000003u) == 0x03000000u && ((a) & IWRAM_MASK) + 4 * (n) <= IWRAM_SIZE)
 
 /* a waiting loop found: the rest of the slice goes */
 #define IDLE_AT(at)                    \
@@ -1185,7 +1187,7 @@ thumb_enter : {
         uint32_t a = r[13] - 4 * n;
         if(!STACK_OK(a, n)) goto slow_t;
         r[13] = a;
-        uint8_t* p = g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        uint8_t* p = g->iwram + (a & IWRAM_MASK);
         uint32_t list = (op & 0xff) | ((op & 0x100) << 6);   /* bit 14: lr */
         while(list) {
           const uint32_t v = r[__builtin_ctz(list)];
@@ -1203,7 +1205,7 @@ thumb_enter : {
         const uint32_t n = kPop8[op & 0xff] + ((op >> 8) & 1);
         const uint32_t a = r[13];
         if(!STACK_OK(a, n)) goto slow_t;
-        const uint8_t* p = g->iwR[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        const uint8_t* p = g->iwram + (a & IWRAM_MASK);
         uint32_t list = op & 0xff;
         while(list) {
           r[__builtin_ctz(list)] = ld32(p);
@@ -1438,7 +1440,7 @@ arm_enter : {
         const uint32_t n = (uint32_t)kPop8[list & 0xff] + kPop8[list >> 8];
         const uint32_t a = r[rn];
         if(!STACK_OK(a, n)) goto slow_a;
-        const uint8_t* p = g->iwR[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        const uint8_t* p = g->iwram + (a & IWRAM_MASK);
         r[rn] = a + 4 * n;
         left -= (int32_t)n + 1;
         uint32_t todo = list & 0x7fff;
@@ -1457,7 +1459,7 @@ arm_enter : {
         const uint32_t n = (uint32_t)kPop8[list & 0xff] + kPop8[list >> 8];
         uint32_t a = r[rn] - 4 * n;
         if(!STACK_OK(a, n)) goto slow_a;
-        uint8_t* p = g->iwW[(a >> PG_SHIFT) & (IWRAM_PAGES - 1)] + (a & PG_MASK);
+        uint8_t* p = g->iwram + (a & IWRAM_MASK);
         r[rn] = a;
         left -= (int32_t)n;
         while(list) {

@@ -111,45 +111,49 @@ static void skipMixer(Gba* g, uint32_t src, uint32_t dst, uint32_t bytes) {
 
 static void cpuSet(Gba* g) {
   uint32_t* r = g->cpu.r;
-  uint32_t src = r[0], dst = r[1], n = r[2] & 0x1fffff;
-  const bool fill = r[2] & (1u << 24);
-  if(r[2] & (1u << 26)) {
-    src &= ~3u;
-    dst &= ~3u;
-    const uint32_t src0 = src, dst0 = dst, bytes = n * 4;
-    const uint32_t v = fill ? mem_r32(g, src) : 0;
-    for(; n; n--, dst += 4) {
-      mem_w32(g, dst, fill ? v : mem_r32(g, src));
-      if(!fill) src += 4;
-    }
-    if(!fill) skipMixer(g, src0, dst0, bytes);
+  const uint32_t count = r[2] & 0x1fffff;
+  const bool fill = r[2] & (1u << 24), wide = r[2] & (1u << 26);
+  const uint32_t unit = wide ? 4 : 2;
+  const uint32_t src = r[0] & ~(unit - 1), dst = r[1] & ~(unit - 1);
+  g->cycles += count * mem_cost(g, dst, wide) + (fill ? 1 : count) * mem_cost(g, src, wide);
+  if(fill) {
+    mem_fill(g, dst, wide ? mem_r32(g, src) : mem_r16(g, src), count, unit);
   } else {
-    src &= ~1u;
-    dst &= ~1u;
-    const uint32_t v = fill ? mem_r16(g, src) : 0;
-    for(; n; n--, dst += 2) {
-      mem_w16(g, dst, fill ? v : mem_r16(g, src));
-      if(!fill) src += 2;
-    }
+    mem_copy(g, src, dst, count * unit, unit);
+    if(wide) skipMixer(g, src, dst, count * 4);
   }
 }
 
 static void cpuFastSet(Gba* g) {
   uint32_t* r = g->cpu.r;
-  uint32_t src = r[0] & ~3u, dst = r[1] & ~3u, n = ((r[2] & 0x1fffff) + 7) & ~7u;
+  const uint32_t src = r[0] & ~3u, dst = r[1] & ~3u, count = ((r[2] & 0x1fffff) + 7) & ~7u;
   const bool fill = r[2] & (1u << 24);
-  const uint32_t src0 = src, dst0 = dst, bytes = n * 4;
-  const uint32_t v = fill ? mem_r32(g, src) : 0;
-  for(; n; n--, dst += 4) {
-    mem_w32(g, dst, fill ? v : mem_r32(g, src));
-    if(!fill) src += 4;
+  g->cycles += count * mem_cost(g, dst, true) + (fill ? 1 : count) * mem_cost(g, src, true);
+  if(fill) {
+    mem_fill(g, dst, mem_r32(g, src), count, 4);
+  } else {
+    mem_copy(g, src, dst, count * 4, 4);
+    skipMixer(g, src, dst, count * 4);
   }
-  if(!fill) skipMixer(g, src0, dst0, bytes);
 }
 
 /* ------------------------------------------------------- decompression -- */
 
+/* The block the game wants decompressed, if the pack has it ready: memory is
+ * pointed at the copy (or filled from it), and nothing is decompressed. */
+static bool fromPack(Gba* g, uint32_t kind) {
+  const uint32_t src = g->cpu.r[0], dst = g->cpu.r[1];
+  if(src < 0x08000000u || src >= 0x0e000000u || (src & 3)) return false;
+  uint32_t size;
+  const uint8_t* data = pack_blob(&g->pack, 0x08000000u | (src & 0x01ffffffu), kind, &size);
+  if(!data) return false;
+  g->cycles += size * 2;   /* the real thing takes much longer; games do not count on it */
+  mem_load(g, dst, data, size);
+  return true;
+}
+
 static void lz77(Gba* g) {
+  if(fromPack(g, PACK_LZ77)) return;
   uint32_t src = g->cpu.r[0], dst = g->cpu.r[1];
   int32_t left = (int32_t)(mem_r32(g, src & ~3u) >> 8);
   src += 4;
@@ -169,6 +173,7 @@ static void lz77(Gba* g) {
 }
 
 static void runLength(Gba* g) {
+  if(fromPack(g, PACK_RL)) return;
   uint32_t src = g->cpu.r[0], dst = g->cpu.r[1];
   int32_t left = (int32_t)(mem_r32(g, src & ~3u) >> 8);
   src += 4;
