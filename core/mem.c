@@ -495,7 +495,7 @@ static const uint8_t kCorners[PACK_CLASSES] = {14, 7, 3, 2};
  *   80-bf      zeros: (low 6 bits) + 2 of them
  *   c0-ff      (low 4 bits) + 3 bytes repeat those 1, 2 or 4 bytes back
  *              (bits 4-5: 0, 1, 2), or as far back as the next byte + 1 says (3) */
-static uint32_t packPage(const uint8_t* s, uint8_t* out) {
+uint32_t page_pack(const uint8_t* s, uint8_t* out) {
   uint8_t last[256];   /* where a pair of bytes was last seen */
   uint32_t n = 0, i = 0, lit = 0;
   memset(last, 0, sizeof last);
@@ -557,7 +557,7 @@ static uint32_t packPage(const uint8_t* s, uint8_t* out) {
   return n;
 }
 
-static void unpackPage(const uint8_t* in, uint8_t* out) {
+void page_unpack(const uint8_t* in, uint8_t* out) {
   uint32_t o = 0;
   while(o < PG_SIZE) {
     const uint32_t c = *in++, room = PG_SIZE - o;
@@ -692,7 +692,7 @@ static void sweep(Gba* g, uint32_t n, bool need) {
       return;
     }
     uint8_t small[PACK_MAX];
-    const uint32_t size = packPage(f, small);
+    const uint32_t size = page_pack(f, small);
     if(!size) {   /* it does not pack: left awake, and not tried again for a while */
       g->hard[i >> 3] |= (uint8_t)(1u << (i & 7));
       *slot = f;
@@ -738,7 +738,7 @@ static uint8_t* wake(Gba* g, const uint8_t** slot, uint8_t* state) {
   const uint8_t* const corner = untag(*slot);
   uint8_t* const f = frameGet(g);
   if(g->outOfMemory) return f;
-  unpackPage(corner, f);
+  page_unpack(corner, f);
   cornerFree(g, corner);
   *slot = f;
   *state = PG_RAM;

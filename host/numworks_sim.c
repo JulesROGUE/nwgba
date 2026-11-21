@@ -81,6 +81,26 @@ void eadk_display_draw_string(const char* text, eadk_point_t p, bool large, eadk
   }
 }
 
+/* What the app leaves at the end of its RAM outlives it on the calculator
+ * (the game's save memory): with NW_SIM_KEEP=file, the end of the RAM is
+ * read from that file at the start and written to it at the end. */
+#define KEEP_BYTES (64u * 1024u)
+static void keepOut(void) {
+  const char* name = getenv("NW_SIM_KEEP");
+  if(!name) return;
+  FILE* f = fopen(name, "wb");
+  if(!f) return;
+  fwrite(nw_sim_heap_end - KEEP_BYTES, 1, KEEP_BYTES, f);
+  fclose(f);
+}
+static void keepIn(void) {
+  const char* name = getenv("NW_SIM_KEEP");
+  FILE* f = name ? fopen(name, "rb") : NULL;
+  if(!f) return;
+  if(fread(nw_sim_heap_end - KEEP_BYTES, 1, KEEP_BYTES, f) != KEEP_BYTES) memset(nw_sim_heap_end - KEEP_BYTES, 0, KEEP_BYTES);
+  fclose(f);
+}
+
 /* The start screen waits for a key: OK is pressed for a moment. After that
  * every scan is a frame of the game, and the script decides. */
 eadk_keyboard_state_t eadk_keyboard_scan(void) {
@@ -97,6 +117,7 @@ eadk_keyboard_state_t eadk_keyboard_scan(void) {
   if(scans >= maxFrames) {
     shot();
     printf("sim: %d frames, clock %llu ms, %llu pixels sent a frame\n", scans, (unsigned long long)clockMs, pixelsSent / (unsigned)scans);
+    keepOut();
     exit(0);
   }
   const uint16_t pad = scriptKeys(script, (uint32_t)scans);
@@ -163,7 +184,9 @@ int main(int argc, char** argv) {
   }
   nw_sim_heap_start = calloc(ramKb, 1024);
   nw_sim_heap_end = nw_sim_heap_start + ramKb * 1024;
+  keepIn();
   app_main(0, NULL);
+  keepOut();
   shot();
   printf("sim: the app returned\n");
   return 0;

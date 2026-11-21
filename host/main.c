@@ -114,6 +114,8 @@ int main(int argc, char** argv) {
   int frames = 600, every = 60, hashEvery = 0, ramKb = 0;
   bool report = false;
   const char* verify = NULL;   /* a file the ROM, as read through the pack, must be equal to */
+  const char* saveOut = NULL;  /* the save memory, written to a file at the end (as other emulators keep it) */
+  const char* saveIn = NULL;   /* and read from one at the start */
   const char* dump = NULL;
   const char* keys = NULL;
   for(int i = 2; i < argc; i++) {
@@ -125,6 +127,8 @@ int main(int argc, char** argv) {
     else if(!strcmp(argv[i], "--ram") && i + 1 < argc) ramKb = atoi(argv[++i]);
     else if(!strcmp(argv[i], "--mem-report")) report = true;
     else if(!strcmp(argv[i], "--verify") && i + 1 < argc) verify = argv[++i];
+    else if(!strcmp(argv[i], "--save-out") && i + 1 < argc) saveOut = argv[++i];
+    else if(!strcmp(argv[i], "--save-in") && i + 1 < argc) saveIn = argv[++i];
   }
   FILE* f = fopen(argv[1], "rb");
   if(!f) {
@@ -164,9 +168,20 @@ int main(int argc, char** argv) {
     return 1;
   }
   uint8_t* mem = calloc(1, memBytes);
-  uint8_t* save = calloc(1, SAVE_BYTES(255));
+  uint8_t* save = calloc(1, SAVE_BYTES(500));
   const GbaHost host = {&h, hostLine, hostLog};
-  gba_init(&g, &host, &pack, mem, memBytes, save, SAVE_BYTES(255));
+  gba_init(&g, &host, &pack, mem, memBytes, save, SAVE_BYTES(500));
+  if(saveIn) {
+    FILE* sf = fopen(saveIn, "rb");
+    if(!sf) {
+      fprintf(stderr, "cannot read %s\n", saveIn);
+      return 1;
+    }
+    uint32_t at = 0;
+    for(int c; (c = fgetc(sf)) != EOF && at < SAVE_SPAN; at++)
+      if(c != 0xff) save_put(&g.save, at, (uint32_t)c);
+    fclose(sf);
+  }
   if(verify) {   /* the whole ROM, read through the core as the game would, against a reference */
     FILE* vf = fopen(verify, "rb");
     if(!vf) {
@@ -223,7 +238,14 @@ int main(int argc, char** argv) {
   if(g.outOfMemory) fprintf(stderr, "; OUT OF MEMORY");
   fprintf(stderr, "; interrupts: %u handled, %u known to do nothing", (unsigned)g.irqTaken, (unsigned)g.irqSkipped);
   if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);
-  if(save_used(&g.save)) fprintf(stderr, "; save memory: %u pages of 256 bytes written", (unsigned)save_used(&g.save));
+  save_sync(&g.save);
+  if(save_used(&g.save)) fprintf(stderr, "; save memory: %u pages written, kept in %u bytes%s", (unsigned)save_used(&g.save), (unsigned)SAVE_BYTES(save_slabs(&g.save)), g.save.full ? " (FULL)" : "");
+  if(saveOut) {
+    FILE* sf = fopen(saveOut, "wb");
+    const uint32_t span = g.saveType == GBA_SAVE_FLASH1M ? SAVE_SPAN : 0x10000u;
+    for(uint32_t at = 0; sf && at < span; at++) fputc((int)save_get(&g.save, at), sf);
+    if(sf) fclose(sf);
+  }
   fprintf(stderr, "\n");
   return g.outOfMemory ? 2 : 0;
 }

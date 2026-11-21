@@ -47,6 +47,14 @@ Les images sont les mêmes, au pixel près, qu'avec toute la mémoire voulue. Ce
 
 Dans les deux cas les échantillons de son ne sont pas gardés (personne ne les jouera) : 2 Mo dans Rubis, cris compris.
 
+### Les sauvegardes
+
+La mémoire de sauvegarde du jeu (SRAM, ou flash de 64 ou 128 Ko) est gardée page par page dans la mémoire vive, tout au bout de celle que la calculatrice prête à l'appli, et compressée comme le reste (`core/save.c`) : une page jamais écrite ou toute à zéro ne prend rien, les autres se rangent à plusieurs par tranche de 260 octets. Une sauvegarde toute neuve de Pokémon Rubis, 56 Ko tels que le jeu les écrit, tient en 3,9 Ko.
+
+Ce qui est là survit à la sortie de l'appli : au lancement suivant elle retrouve sa réserve (un nombre magique, le jeu, une somme de contrôle), et lui donne ce qu'elle occupe déjà plus de quoi écrire encore (10 Ko pour un jeu à 128 Ko de sauvegarde). L'appli n'est pas prévenue quand on la quitte : la page en cours d'écriture est rangée dès que le jeu a laissé sa mémoire de sauvegarde tranquille deux images de suite.
+
+Ce que ça ne fait pas : la mémoire vive ne survit ni à une réinitialisation de la calculatrice, ni à une réinstallation. Rien n'est encore écrit ailleurs. `nwgba-host --save-out` et `--save-in` lisent et écrivent le format `.sav` des autres émulateurs.
+
 ### La vitesse
 
 `make bench ROM=jeu.pack` exécute le cœur, compilé comme pour la calculatrice, sur un Cortex-M7 émulé par QEMU, et compte les instructions par image. Repère : sur ce même banc, nwsnes coûte environ 3,3 millions d'instructions par image pour Donkey Kong Country tel qu'il se joue sur la calculatrice, où il tourne à sa vitesse normale.

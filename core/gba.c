@@ -31,7 +31,7 @@ void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint3
   g->pack = *pack;
   g->romSize = pack->romSize;
   g->saveType = (uint8_t)pack->saveType;
-  save_attach(&g->save, save, saveBytes, pack->key);
+  save_attach(&g->save, save + saveBytes, saveBytes, pack->key);   /* the store ends where the area ends */
   /* the memory given: the fast RAM, then the list of free frames, then the frames */
   g->iwram = mem;
   mem += IWRAM_SIZE;

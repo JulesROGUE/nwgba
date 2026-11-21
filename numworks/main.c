@@ -46,7 +46,11 @@ extern uint8_t _heap_end;
 #define WIDE_H (GBA_H * 4 / 3)                       /* 213 lines */
 #define WIDE_Y ((EADK_SCREEN_HEIGHT - WIDE_H) / 2)
 #define MAX_SKIP 3        /* frames in a row that may go undrawn to keep up */
-#define SAVE_PAGES 32     /* 8 KB of the game's save memory can be written */
+/* Room for the game's save memory, packed (core/save.h): what is already
+ * there, and this much more for what the game will write this time. */
+#define SAVE_MORE_BIG SAVE_BYTES(40)     /* a game with 128 KB of save memory: 10 KB */
+#define SAVE_MORE_SMALL SAVE_BYTES(12)   /* the others: 3 KB */
+#define SAVE_MOST SAVE_BYTES(180)        /* 47 KB at the very most */
 #define FRAME_US 16743    /* 59.73 frames a second */
 
 static Gba gba;
@@ -267,7 +271,12 @@ int main(int argc, char* argv[]) {
   /* the saves at the very end of the RAM (they outlive the app, see
    * core/save.h), the console's memory in all that comes before */
   uint8_t* mem = (uint8_t*)(((uintptr_t)HEAP_START + 3) & ~(uintptr_t)3);
-  uint8_t* saveArea = (uint8_t*)(((uintptr_t)HEAP_END - SAVE_BYTES(SAVE_PAGES)) & ~(uintptr_t)3);
+  uint8_t* const saveTop = (uint8_t*)((uintptr_t)HEAP_END & ~(uintptr_t)3);
+  const uint32_t saveHas = save_peek(saveTop, pack.key);
+  uint32_t saveBytes = (saveHas ? saveHas : SAVE_BYTES(0)) + (pack.saveType == GBA_SAVE_FLASH1M ? SAVE_MORE_BIG : SAVE_MORE_SMALL) - SAVE_BYTES(0);
+  if(saveBytes > SAVE_MOST) saveBytes = saveHas > SAVE_MOST ? saveHas : SAVE_MOST;
+  if(pack.saveType == GBA_SAVE_NONE) saveBytes = SAVE_BYTES(0);
+  uint8_t* saveArea = (uint8_t*)(((uintptr_t)saveTop - saveBytes) & ~(uintptr_t)3);
   const uint32_t memBytes = saveArea > mem ? (uint32_t)(saveArea - mem) : 0;
   if(memBytes < GBA_MEM_MIN) {
     text(0, "nwgba");
@@ -276,7 +285,7 @@ int main(int argc, char* argv[]) {
     return 0;
   }
   const GbaHost host = {NULL, putLine, NULL};
-  gba_init(&gba, &host, &pack, mem, memBytes, saveArea, SAVE_BYTES(SAVE_PAGES));
+  gba_init(&gba, &host, &pack, mem, memBytes, saveArea, (uint32_t)(saveTop - saveArea));
 
   text(0, "nwgba 0.1");
   memcpy(buf, (const char*)eadk_external_data + 64, 12);
@@ -300,6 +309,7 @@ int main(int argc, char* argv[]) {
   uint32_t frame = 0;     /* frames run since start */
   uint32_t skipped = 0;   /* in a row, not drawn */
   bool stats = false, statsKey = false, wideKey = false;
+  uint32_t saveQuiet = 0, saveFullUntil = 0;
   uint64_t statsAt = start;
   uint32_t statsFrames = 0, statsDrawn = 0, msDrawn = 0, msPlain = 0, irq0 = 0, skip0 = 0;
 
@@ -328,6 +338,24 @@ int main(int argc, char* argv[]) {
     gba.render = render;
     gba_runFrame(&gba);
     frame++;
+
+    /* The game's save memory: once the game has left it alone for two
+     * frames, the page it was writing is stored with the rest (the app is
+     * not told when it is left: nothing must be pending for long). */
+    if(gba.save.touched) {
+      gba.save.touched = false;
+      saveQuiet = 0;
+    } else if(gba.save.dirty && ++saveQuiet >= 2) {
+      save_sync(&gba.save);
+    }
+    if(gba.save.full) {   /* no room for what the game saved: say so for ten seconds */
+      gba.save.full = false;
+      saveFullUntil = frame + 600;
+    }
+    if(saveFullUntil > frame && frame % 60 == 0)
+      eadk_display_draw_string("Sauvegarde : plus de place (quitter, relancer)", (eadk_point_t){0, EADK_SCREEN_HEIGHT - 14}, false, eadk_color_red, eadk_color_black);
+    else if(saveFullUntil && saveFullUntil == frame)
+      eadk_display_push_rect_uniform((eadk_rect_t){0, EADK_SCREEN_HEIGHT - 14, EADK_SCREEN_WIDTH, 14}, eadk_color_black);
     statsFrames++;
     statsDrawn += render;
 
