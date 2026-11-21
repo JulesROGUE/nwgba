@@ -33,10 +33,10 @@ La place dans la flash se gagne de la même façon : le pack ne garde ni les éc
 
 Et quand la vraie mémoire vient quand même à manquer, **ce qui ne sert pas sur le moment est rangé en petit** (« le coin serré », dans `core/mem.c`). Un jeu garde bien plus de mémoire qu'il n'en touche à un instant donné : des tampons remplis une fois, des images préparées d'avance, des tables presque vides. Une aiguille fait le tour des pages ; celle qu'elle trouve éveillée est endormie (elle garde son contenu, mais le premier accès passera par le chemin lent, qui la réveille) ; celle qu'elle retrouve endormie au tour suivant n'a pas servi entre-temps, et celle-là est compressée (les zéros, et les octets qui répètent ceux d'un peu avant, s'écrivent court) et rangée à plusieurs par cadre de mémoire. Elle est décompressée au premier accès. Rien n'est compté sur les chemins rapides, et un jeu qui a assez de mémoire ne voit rien de tout cela.
 
-| Du démarrage à la fin de l'introduction | vraie mémoire demandée | donnée | pages compressées, puis décompressées |
+| Depuis le démarrage (12 000 images) | vraie mémoire demandée | donnée | pages compressées, puis décompressées |
 |---|---|---|---|
-| Pokémon Rubis | 100 Ko | 94 Ko (la calculatrice) | 45, puis 25 |
-| Pokémon Rubis | 100 Ko | 67 Ko | 140, puis 58 |
+| Pokémon Rubis, jusque dans la maison | 111 Ko | 94 Ko (la calculatrice) | 81, puis 61 |
+| Pokémon Rubis, jusque dans la maison | 111 Ko | 62 Ko | 396, puis 327 |
 | Golden Sun (3000 images) | plus de 200 Ko | 94 Ko | 368, puis 291 |
 | Advance Wars, jusqu'à la bataille | 61 Ko | 37 Ko | 501, puis 363 |
 
@@ -57,7 +57,7 @@ Advance Wars, dans une carte de bataille :
 | instructions, sans dessiner | 4,7 millions | 2,0 millions | 1,1 million |
 | instructions, en dessinant | 6,8 millions | 3,0 millions | 2,2 millions |
 | défauts de cache dans la flash, sans dessiner (caches de 8 Ko) | | 10 600 | 4 400 |
-| temps sur la calculatrice, sans dessiner | | 21 ms mesurés | 12 ms attendus |
+| temps sur la calculatrice, sans dessiner | | 21 ms mesurés | 13 ms mesurés (12 attendus) |
 
 Ce qui a compté :
 
