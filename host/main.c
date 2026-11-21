@@ -79,7 +79,8 @@ int main(int argc, char** argv) {
   } else {
     pack_plain(&pack, file, size, malloc(size / PG_SIZE * 2));
     for(uint32_t i = 0; i + 8 < size; i += 4) {   /* the kind of save memory, from the name of the library the game was built with */
-      if(!memcmp(file + i, "FLASH", 5)) pack.saveType = GBA_SAVE_FLASH;
+      if(!memcmp(file + i, "FLASH1M_V", 9)) pack.saveType = GBA_SAVE_FLASH1M;
+      else if(!memcmp(file + i, "FLASH", 5) && pack.saveType != GBA_SAVE_FLASH1M) pack.saveType = GBA_SAVE_FLASH;
       else if(!memcmp(file + i, "SRAM_V", 6)) pack.saveType = GBA_SAVE_SRAM;
       else if(!memcmp(file + i, "EEPROM_V", 8)) pack.saveType = GBA_SAVE_EEPROM;
     }

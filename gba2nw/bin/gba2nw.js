@@ -58,7 +58,7 @@ function prepare(argv) {
   const r = pack.build(rom, { limit1: opts.part1Kb * 1024, keepSamples: opts.keepSamples, keepCompressed: opts.keepCompressed, plain: opts.plain });
   fs.writeFileSync(out, Buffer.concat([r.part1, r.part2]));
   const p = r.report;
-  console.log(`${p.title} (${p.code}), ROM de ${kb(p.romSize)}, sauvegarde : ${{ none: 'aucune', sram: 'SRAM', flash: 'flash', eeprom: 'EEPROM' }[p.save]}`);
+  console.log(`${p.title} (${p.code}), ROM de ${kb(p.romSize)}, sauvegarde : ${{ none: 'aucune', sram: 'SRAM', flash: 'flash 64 Ko', eeprom: 'EEPROM', flash1m: 'flash 128 Ko' }[p.save]}`);
   console.log(`  de la ROM, ${kb(p.kept)} gardés` +
     (p.sampleBytes ? ` ; son retiré : ${p.samples} échantillons, ${kb(p.sampleBytes)}` : '') +
     (p.streamBytes ? ` ; blocs compressés retirés : ${kb(p.streamBytes)}` : ''));

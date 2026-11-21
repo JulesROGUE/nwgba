@@ -17,11 +17,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define SAVE_HEADER (16u + 256u)
+#define SAVE_SPAN 0x20000u          /* the biggest save memory: 128 KB */
+#define SAVE_HEADER (16u + SAVE_SPAN / 256u)
 #define SAVE_BYTES(pages) (SAVE_HEADER + (pages) * 256u)
 
 typedef struct SaveStore {
-  uint8_t* area;       /* header, then for each of the 256 pages its slot + 1 or 0, then the slots */
+  uint8_t* area;       /* header, then for each of the 512 pages its slot + 1 or 0, then the slots */
   uint32_t capacity;   /* slots */
   bool full;           /* a write found no slot left: it was lost */
 } SaveStore;
@@ -29,7 +30,7 @@ typedef struct SaveStore {
 /* takes the area (4-aligned); keeps what is in it if it is a sound store of
  * the same game (key) and the same size, else starts empty. True if kept. */
 bool save_attach(SaveStore* s, uint8_t* area, uint32_t bytes, uint32_t key);
-uint32_t save_get(const SaveStore* s, uint32_t a);              /* a: 0-0xffff */
+uint32_t save_get(const SaveStore* s, uint32_t a);              /* a: below SAVE_SPAN */
 void save_put(SaveStore* s, uint32_t a, uint32_t v);
 void save_erase(SaveStore* s, uint32_t a, uint32_t n);          /* n bytes back to 0xff (whole pages) */
 uint32_t save_used(const SaveStore* s);                         /* slots in use */

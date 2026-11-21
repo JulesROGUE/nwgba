@@ -49,7 +49,7 @@ enum {
   GBA_R = 256, GBA_L = 512
 };
 
-enum { GBA_SAVE_NONE, GBA_SAVE_SRAM, GBA_SAVE_FLASH, GBA_SAVE_EEPROM };
+enum { GBA_SAVE_NONE, GBA_SAVE_SRAM, GBA_SAVE_FLASH, GBA_SAVE_EEPROM, GBA_SAVE_FLASH1M };   /* FLASH: 64 KB, FLASH1M: 128 KB */
 
 /* I/O registers used by name (offsets from 0x04000000) */
 enum {
@@ -173,7 +173,7 @@ struct Gba {
   uint16_t io[0x200];
   SaveStore save;                 /* what the game saves (save.h) */
   uint8_t saveType;               /* GBA_SAVE_... */
-  uint8_t flashState, flashCmd, flashStep;
+  uint8_t flashState, flashCmd, flashStep, flashBank;
 
   Timer timer[4];
   uint32_t timerSync;             /* cycles when the timers were last brought up to date */

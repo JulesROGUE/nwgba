@@ -32,7 +32,7 @@ const MAGIC = 'NWGBAPK1';
 const HEADER = 96;
 const BLOCK = 256;
 const PAGE_LEFT_OUT = 0xffff, PAGE_ZEROS = 0xfffe, PAGE_ONES = 0xfffd;
-const SAVE = { none: 0, sram: 1, flash: 2, eeprom: 3 };
+const SAVE = { none: 0, sram: 1, flash: 2, eeprom: 3, flash1m: 4 };
 
 function fnv1a(buf) {
   let h = 0x811c9dc5;
@@ -43,7 +43,8 @@ function fnv1a(buf) {
 /* the kind of save memory, from the name of the library the game was built with */
 function saveType(rom) {
   const s = rom.toString('latin1');
-  if (/FLASH(512|1M)?_V\d/.test(s)) return SAVE.flash;
+  if (/FLASH1M_V\d/.test(s)) return SAVE.flash1m;
+  if (/FLASH(512)?_V\d/.test(s)) return SAVE.flash;
   if (/SRAM(_F)?_V\d/.test(s)) return SAVE.sram;
   if (/EEPROM_V\d/.test(s)) return SAVE.eeprom;
   return SAVE.none;

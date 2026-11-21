@@ -2,7 +2,7 @@
 
 Un émulateur **Game Boy Advance** taillé pour la calculatrice **NumWorks** (N0110), dans la lignée de [nwsnes](https://github.com/JulesROGUE/nwsnes). Sans son, et sans fichier BIOS : les fonctions du BIOS que les jeux appellent sont réécrites ici.
 
-> **État : premier essai sur calculatrice à faire.** Sur PC, le cœur fait tourner un jeu du commerce (Advance Wars) jusque dans une carte de bataille, avec la mémoire de la calculatrice. L'appli et l'installateur existent et passent leurs tests sur des doublures de la calculatrice ; rien n'a encore été vu sur une vraie. D'après les mesures, le jeu devrait tourner à peu près à sa vitesse (voir « Vitesse ») ; la calculatrice dira si c'est vrai.
+> **État : Advance Wars tourne sur une vraie N0110**, trop lentement au premier essai (27 % de sa vitesse dans les menus, 70 % en bataille, à 14 images par seconde). Les mesures ne comptaient que les instructions ; ce premier essai a montré que les défauts de cache comptaient autant (voir « La vitesse »). La version suivante, qui en tient compte, n'a pas encore été essayée sur la calculatrice.
 
 ## Ce dépôt ne contient aucun jeu
 
@@ -35,26 +35,37 @@ Ce que ça ne sait pas faire : un jeu qui a besoin de plus de vraie mémoire qu'
 
 ### La vitesse
 
-`make bench ROM=jeu.pack` exécute le cœur, compilé comme pour la calculatrice, sur un Cortex-M7 émulé par QEMU, et compte les instructions par image. Repère : sur ce même banc, nwsnes coûte environ 3,3 millions d'instructions par image pour Donkey Kong Country tel qu'il se joue sur la calculatrice, où il tourne à sa vitesse normale. Ce banc compte des instructions, pas du temps : la vraie calculatrice peut en décider autrement.
+`make bench ROM=jeu.pack` exécute le cœur, compilé comme pour la calculatrice, sur un Cortex-M7 émulé par QEMU, et compte les instructions par image. Repère : sur ce même banc, nwsnes coûte environ 3,3 millions d'instructions par image pour Donkey Kong Country tel qu'il se joue sur la calculatrice, où il tourne à sa vitesse normale.
+
+Ce banc compte des instructions, pas du temps, et la calculatrice en a décidé autrement : son processeur n'a que 16 Ko de cache pour le code et 16 Ko pour les données, et tout ce qui n'y est pas se relit dans la puce de flash, ce qui coûte des centaines d'instructions. `make profile` joue donc aussi ces deux caches (`tools/qprof`, un greffon QEMU) et compte les défauts, fonction par fonction.
 
 Advance Wars, dans une carte de bataille :
 
-| Instructions par image | au départ | maintenant |
-|---|---|---|
-| sans dessiner | 4,7 millions | 2,0 millions |
-| en dessinant une image sur trois | 5,4 millions | 2,3 millions |
-| en dessinant chaque image | 6,8 millions | 3,0 millions |
+| Par image | au départ | 1er essai sur calculatrice | maintenant |
+|---|---|---|---|
+| instructions, sans dessiner | 4,7 millions | 2,0 millions | 1,1 million |
+| instructions, en dessinant | 6,8 millions | 3,0 millions | 2,2 millions |
+| défauts du cache de code, en dessinant | | 14 300 | 3 400 |
 
 Ce qui a compté :
 
-- **les boucles d'attente sont sautées** : un saut en arrière repris avec les mêmes registres et rien d'écrit entre-temps ne changera rien avant le prochain événement, l'horloge y va directement. Y compris quand le jeu prend une interruption à chaque ligne de l'image ;
+- **les boucles d'attente sont sautées** : un saut en arrière repris avec les mêmes registres et rien d'écrit entre-temps ne changera rien avant le prochain événement, l'horloge y va directement. Une boucle qui n'a lu aucun registre n'est même pas relancée tant que la mémoire et les boutons ne changent pas ;
+- **les interruptions qui ne font rien ne sont pas prises** (`core/irqm.c`) : le jeu en demande une à chaque ligne de l'image, et sur presque toutes son gestionnaire regarde le numéro de la ligne et revient. Un gestionnaire est observé pendant qu'il tourne ; s'il n'a fait qu'acquitter l'interruption, alors sur cette ligne, tant que ce qu'il a lu n'a pas changé, l'interruption est acquittée sans l'exécuter. 82 % des interruptions d'Advance Wars passent ainsi ;
 - **le mixeur de son est sauté** : le pilote de son de la plupart des jeux (« MP2K ») mélange ses voix avec une routine qu'il copie en mémoire ; sa boucle est court-circuitée au passage ;
 - **la boucle de l'interprète** garde sa place et son horloge dans des registres, fait les instructions courantes sur place, et ne regarde l'heure qu'aux sauts ;
 - **le dessin** ne va chercher qu'une fois par ligne la rangée de la carte, ne relit pas une tuile identique à la précédente, écrit d'un bloc les tuiles sans pixel transparent, et ne cherche les sprites visibles que quand leur table change.
 
-Ce qui reste à gagner : un interprète écrit en assembleur (aujourd'hui une trentaine d'instructions de la calculatrice par instruction du jeu).
+Ce qui reste à gagner : un interprète écrit en assembleur (aujourd'hui une trentaine d'instructions de la calculatrice par instruction du jeu), et un code mieux rangé pour le cache.
 
-`make profile` dit où passent les instructions, fonction par fonction et ligne par ligne (`tools/qprof`, un greffon QEMU).
+### Les jeux essayés
+
+| | Place (4,8 Mo) | Vraie mémoire (94 Ko) | Sauvegarde |
+|---|---|---|---|
+| Advance Wars (4 Mo) | 4,6 Mo | 61 Ko | 2 Ko écrits |
+| Golden Sun (8 Mo) | 7,9 Mo | 208 Ko | |
+| Pokémon Rubis (16 Mo, dont 8,5 utiles) | 6 Mo au mieux, tout le son retiré | 100 Ko dès l'introduction | 112 Ko |
+
+Les deux derniers démarrent sur PC avec ce cœur, mais ne tiennent pas dans la calculatrice : ils décompressent leurs images avec leurs propres routines ou les recopient par morceaux, si bien que presque rien ne peut se lire directement dans la flash.
 
 ## Ce qui est fait
 
@@ -62,7 +73,7 @@ Ce qui reste à gagner : un interprète écrit en assembleur (aujourd'hui une tr
 - Mémoire en pages, registres, minuteries, DMA, interruptions (`core/mem.c`) ; lecture du pack (`core/pack.c`).
 - BIOS réécrit : divisions, racine, arc tangente, copies, décompressions LZ77, Huffman et RLE, matrices affines, attente d'interruption (`core/bios.c`).
 - Image (`core/ppu.c`) : fonds en tuiles, fonds affines, modes bitmap, sprites simples et affines, fondus au blanc et au noir. **Pas encore** : fenêtres, transparence entre deux couches, mosaïque.
-- Sauvegardes SRAM et flash (`core/save.c`), seules les pages écrites prenant de la place. Sur la calculatrice elles sont gardées au bout de la mémoire de l'appli : elles survivent quand on quitte l'appli, **pas** au lancement d'une autre appli ni à une réinitialisation. **Pas encore** : EEPROM.
+- Sauvegardes SRAM et flash de 64 et 128 Ko (`core/save.c`), seules les pages écrites prenant de la place. Sur la calculatrice elles sont gardées au bout de la mémoire de l'appli : elles survivent quand on quitte l'appli, **pas** au lancement d'une autre appli ni à une réinitialisation. **Pas encore** : EEPROM.
 - L'appli (`numworks/main.c`) et l'outil PC `gba2nw` (préparer un jeu, l'installer en deux parties).
 
 ## Utiliser
@@ -76,7 +87,7 @@ node bin/gba2nw.js preparer jeu.gba        # écrit jeu.pack
 node bin/gba2nw.js installer jeu.pack      # installe l'appli et le jeu
 ```
 
-Sur la calculatrice : flèches = croix, OK = A, Retour = B, shift = Select, alpha ou EXE = Start, e^x = L, 10^x = R. La touche 0 affiche dans la marge les images par seconde, la vitesse en pour cent, la mémoire prise et la mémoire libre.
+Sur la calculatrice : flèches = croix, OK = A, Retour = B, shift = Select, alpha ou EXE = Start, e^x = L, 10^x = R. La touche 1 passe de l'image étirée sur toute la largeur à l'image telle quelle. La touche 0 affiche une ligne en bas : images par seconde, vitesse en pour cent, mémoire prise + libre (Ko), millisecondes d'une image dessinée / non dessinée, interruptions exécutées + évitées par image.
 
 ## Construire
 

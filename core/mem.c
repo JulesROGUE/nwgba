@@ -352,21 +352,30 @@ static uint32_t saveRead(Gba* g, uint32_t a) {
   a &= 0xffff;
   g->ioSeen = 1;
   if(g->saveType == GBA_SAVE_NONE) return 0xff;
-  if(g->flashState == 0x90 && a < 2) return a ? 0x1b : 0x32;   /* a Panasonic 64 KB flash */
-  return save_get(&g->save, a);
+  if(g->flashState == 0x90 && a < 2) {   /* which chip: a Panasonic of 64 KB, a Sanyo of 128 KB */
+    if(g->saveType == GBA_SAVE_FLASH1M) return a ? 0x13 : 0x62;
+    return a ? 0x1b : 0x32;
+  }
+  return save_get(&g->save, a | (uint32_t)g->flashBank << 16);
 }
 
 static void saveWrite(Gba* g, uint32_t a, uint32_t v) {
   a &= 0xffff;
   v &= 0xff;
   if(g->saveType == GBA_SAVE_NONE) return;
-  if(g->saveType != GBA_SAVE_FLASH) {
+  if(g->saveType == GBA_SAVE_SRAM) {
     save_put(&g->save, a, v);
     return;
   }
+  const uint32_t bank = (uint32_t)g->flashBank << 16;
   /* flash: commands are three writes, AA to 5555, 55 to 2AAA, then the command */
   if(g->flashCmd == 0xa0) {   /* program one byte */
-    save_put(&g->save, a, save_get(&g->save, a) & v);
+    save_put(&g->save, a | bank, save_get(&g->save, a | bank) & v);
+    g->flashCmd = 0;
+    return;
+  }
+  if(g->flashCmd == 0xb0 && a == 0) {   /* which half of a 128 KB chip is seen */
+    g->flashBank = g->saveType == GBA_SAVE_FLASH1M ? (uint8_t)(v & 1) : 0;
     g->flashCmd = 0;
     return;
   }
@@ -382,16 +391,16 @@ static void saveWrite(Gba* g, uint32_t a, uint32_t v) {
   } else if(g->flashStep == 2) {
     g->flashStep = 0;
     if(v == 0x30 && g->flashCmd == 0x80) {   /* erase a 4 KB sector */
-      save_erase(&g->save, a & 0xf000, 0x1000);
+      save_erase(&g->save, (a & 0xf000) | bank, 0x1000);
       g->flashCmd = 0;
     } else if(a == 0x5555) {
       if(v == 0x10 && g->flashCmd == 0x80) {
-        save_erase(&g->save, 0, 0x10000);
+        save_erase(&g->save, 0, SAVE_SPAN);
         g->flashCmd = 0;
       } else if(v == 0x90) {
         g->flashState = 0x90;
       } else {
-        g->flashCmd = (uint8_t)v;   /* 80: erase follows, A0: a byte follows */
+        g->flashCmd = (uint8_t)v;   /* 80: erase follows, A0: a byte follows, B0: the half follows */
       }
     }
   } else {

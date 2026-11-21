@@ -9,11 +9,12 @@
 static inline uint32_t* head(const SaveStore* s) { return (uint32_t*)(void*)s->area; }
 static inline uint8_t* index_(const SaveStore* s) { return s->area + 16; }
 static inline uint8_t* slot(const SaveStore* s, uint32_t k) { return s->area + SAVE_HEADER + k * 256; }
+#define PAGES (SAVE_SPAN / 256u)
 
 static uint32_t sum(const SaveStore* s) {
   uint32_t t = 0;
   const uint8_t* p = index_(s);
-  for(uint32_t i = 0; i < 256 + s->capacity * 256; i++) t += p[i];
+  for(uint32_t i = 0; i < PAGES + s->capacity * 256; i++) t += p[i];
   return t;
 }
 
@@ -25,7 +26,7 @@ bool save_attach(SaveStore* s, uint8_t* area, uint32_t bytes, uint32_t key) {
   uint32_t* h = head(s);
   if(h[0] == MAGIC && h[1] == key && h[2] == s->capacity && h[3] == sum(s)) {
     bool sane = true;
-    for(int i = 0; i < 256; i++) sane &= index_(s)[i] <= s->capacity;
+    for(uint32_t i = 0; i < PAGES; i++) sane &= index_(s)[i] <= s->capacity;
     if(sane) return true;
   }
   memset(area, 0, SAVE_HEADER);
@@ -38,24 +39,24 @@ bool save_attach(SaveStore* s, uint8_t* area, uint32_t bytes, uint32_t key) {
 }
 
 uint32_t save_get(const SaveStore* s, uint32_t a) {
-  const uint32_t k = index_(s)[(a >> 8) & 255];
+  const uint32_t k = index_(s)[(a >> 8) & (PAGES - 1)];
   return k ? slot(s, k - 1)[a & 255] : 0xff;
 }
 
 uint32_t save_used(const SaveStore* s) {
   uint32_t n = 0;
-  for(int i = 0; i < 256; i++) n += index_(s)[i] != 0;
+  for(uint32_t i = 0; i < PAGES; i++) n += index_(s)[i] != 0;
   return n;
 }
 
 void save_put(SaveStore* s, uint32_t a, uint32_t v) {
-  uint8_t* ix = &index_(s)[(a >> 8) & 255];
+  uint8_t* ix = &index_(s)[(a >> 8) & (PAGES - 1)];
   v &= 0xff;
   if(!*ix) {
     if(v == 0xff) return;
     /* a free slot: one no page uses */
     uint8_t used[32] = {0};
-    for(int i = 0; i < 256; i++) {
+    for(uint32_t i = 0; i < PAGES; i++) {
       const uint32_t k = index_(s)[i];
       if(k) used[(k - 1) >> 3] |= (uint8_t)(1u << ((k - 1) & 7));
     }
@@ -74,7 +75,7 @@ void save_put(SaveStore* s, uint32_t a, uint32_t v) {
 }
 
 void save_erase(SaveStore* s, uint32_t a, uint32_t n) {
-  for(uint32_t pg = (a >> 8) & 255; n >= 256; pg = (pg + 1) & 255, n -= 256) {
+  for(uint32_t pg = (a >> 8) & (PAGES - 1); n >= 256; pg = (pg + 1) & (PAGES - 1), n -= 256) {
     uint8_t* ix = &index_(s)[pg];
     if(!*ix) continue;
     uint8_t* p = slot(s, *ix - 1u);
