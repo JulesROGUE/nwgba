@@ -31,7 +31,16 @@ Pour Advance Wars, du démarrage à la première bataille : 61 Ko de vraie mémo
 
 La place dans la flash se gagne de la même façon : le pack ne garde ni les échantillons de son (personne ne les jouera), ni les blocs compressés d'origine (leur version décompressée les remplace). La ROM de 4 Mo d'Advance Wars donne un pack de 4,6 Mo, en deux parties.
 
-Ce que ça ne sait pas faire : un jeu qui a besoin de plus de vraie mémoire qu'il n'y en a s'arrête (« Mémoire pleine »). Et un jeu de plus de 4 Mo ne tient pas.
+Et quand la vraie mémoire vient quand même à manquer, **ce qui ne sert pas sur le moment est rangé en petit** (« le coin serré », dans `core/mem.c`). Un jeu garde bien plus de mémoire qu'il n'en touche à un instant donné : des tampons remplis une fois, des images préparées d'avance, des tables presque vides. Une aiguille fait le tour des pages ; celle qu'elle trouve éveillée est endormie (elle garde son contenu, mais le premier accès passera par le chemin lent, qui la réveille) ; celle qu'elle retrouve endormie au tour suivant n'a pas servi entre-temps, et celle-là est compressée (les zéros, et les octets qui répètent ceux d'un peu avant, s'écrivent court) et rangée à plusieurs par cadre de mémoire. Elle est décompressée au premier accès. Rien n'est compté sur les chemins rapides, et un jeu qui a assez de mémoire ne voit rien de tout cela.
+
+| Du démarrage à la fin de l'introduction | vraie mémoire demandée | donnée | pages compressées, puis décompressées |
+|---|---|---|---|
+| Pokémon Rubis | 100 Ko | 94 Ko (la calculatrice) | 45, puis 25 |
+| Pokémon Rubis | 100 Ko | 67 Ko | 140, puis 58 |
+| Golden Sun (3000 images) | plus de 200 Ko | 94 Ko | 368, puis 291 |
+| Advance Wars, jusqu'à la bataille | 61 Ko | 37 Ko | 501, puis 363 |
+
+Les images sont les mêmes, au pixel près, qu'avec toute la mémoire voulue. Ce que ça ne sait pas faire : un jeu qui *touche* à chaque image plus de mémoire qu'il n'y en a passe son temps à compresser, et s'arrête (« Mémoire pleine ») si rien ne se compresse. Et il reste la place dans la flash : un jeu de plus de 4 Mo n'y tient pas tel quel.
 
 ### La vitesse
 
@@ -56,6 +65,7 @@ Ce qui a compté :
 - **les interruptions qui ne font rien ne sont pas prises** (`core/irqm.c`) : le jeu en demande une à chaque ligne de l'image, et sur presque toutes son gestionnaire regarde le numéro de la ligne et revient. Un gestionnaire est observé pendant qu'il tourne ; s'il n'a fait qu'acquitter l'interruption, alors sur cette ligne, tant que ce qu'il a lu n'a pas changé, l'interruption est acquittée sans l'exécuter. 82 % des interruptions d'Advance Wars passent ainsi ; Cela vaut aussi quand elles arrivent au milieu d'un autre gestionnaire : Advance Wars fait le travail d'une image dans celui de fin d'image, et les vingt-cinq interruptions de ligne qui tombaient pendant ce temps étaient toutes prises. Chacune remplaçait dans le cache le code du jeu par celui des interruptions, puis l'inverse : les sauter a divisé par 2,4 les relectures de la flash ;
 - **le mixeur de son est sauté** : le pilote de son de la plupart des jeux (« MP2K ») mélange ses voix avec une routine qu'il copie en mémoire ; sa boucle est court-circuitée au passage ;
 - **la boucle de l'interprète** garde sa place et son horloge dans des registres, fait les instructions courantes sur place, et ne regarde l'heure qu'aux sauts ;
+- **le code qui tourne souvent est regroupé** : ce qui sert à chaque image fait 6 Ko, mais mêlé à ce qui ne sert presque jamais (les sorties lentes de chaque instruction), il s'étalait sur le double, pour 8 Ko de cache. `tools/pgo.sh` fait jouer des jeux au processeur simulé en comptant les branches prises, et le compilateur écarte le reste (`pgo/all.gcda`, à refaire quand `core/` change). Les lectures et écritures en mémoire des instructions Thumb n'existent plus qu'en un exemplaire chacune ;
 - **le dessin** ne va chercher qu'une fois par ligne la rangée de la carte, ne relit pas une tuile identique à la précédente, écrit d'un bloc les tuiles sans pixel transparent, et ne cherche les sprites visibles que quand leur table change.
 
 Ce qui reste à gagner : un interprète écrit en assembleur (aujourd'hui une trentaine d'instructions de la calculatrice par instruction du jeu), et un code mieux rangé pour le cache.

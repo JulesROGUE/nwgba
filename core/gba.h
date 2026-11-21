@@ -41,7 +41,15 @@
 #define IWRAM_SIZE 0x8000u
 #define IWRAM_MASK (IWRAM_SIZE - 1)
 /* what a page of the two big RAMs is */
-enum { PG_ZERO, PG_FIXED, PG_RAM };
+/* What stands behind a page of the big RAMs. PG_ZERO and PG_FIXED read from
+ * data that never changes; PG_RAM has a frame of real RAM. When real RAM
+ * runs short (see "the tight corner" in mem.c): PG_IDLE still has its frame
+ * but was not used lately, PG_PACKED is kept squeezed in a corner of a
+ * frame shared with others. For these two the pointer in the page table has
+ * its lowest bit set and must not be followed: gba_ew / gba_vr wake the
+ * page. */
+enum { PG_ZERO, PG_FIXED, PG_RAM, PG_IDLE, PG_PACKED };
+#define PACK_CLASSES 4
 
 /* buttons, as in KEYINPUT (1 = pressed here) */
 enum {
@@ -169,6 +177,14 @@ struct Gba {
   uint16_t* freeFrames;           /* the free ones, a stack */
   uint32_t nFrames, nFree, lowFree;   /* lowFree: the fewest ever free */
   bool outOfMemory;               /* a page needed a frame and there was none: the game cannot go on */
+  /* the tight corner: pages put to sleep and packed when frames run short */
+  uint16_t hand;                  /* the next page the sweep looks at */
+  uint16_t slabHead[PACK_CLASSES];   /* per size of corner: the first frame that has one free (0: none) */
+  uint16_t pinV[2];               /* video pages the picture code is holding: not to be packed */
+  uint16_t nPacked, nSlabs;       /* pages packed now, and the frames they share */
+  uint8_t handTurns;
+  uint8_t hard[(EWRAM_PAGES + VRAM_PAGES + 7) / 8];   /* pages that did not pack: not tried again for a while */
+  uint32_t packs, unpacks, wakes; /* since the start */
   uint32_t leftOutReads;          /* reads of ROM pages the pack left out */
   Pack pack;
   struct RomWindow {              /* stretches of ROM read as data before the two at hand */
@@ -250,6 +266,17 @@ void mem_fill(Gba* g, uint32_t dst, uint32_t value, uint32_t count, uint32_t uni
 void mem_load(Gba* g, uint32_t dst, const uint8_t* data, uint32_t n);
 /* the frame of a page being written to for the first time (slot, state: the page's entries) */
 uint8_t* mem_frame(Gba* g, const uint8_t** slot, uint8_t* state);
+/* a page that sleeps or is packed, made real RAM again: where it is */
+const uint8_t* mem_wake(Gba* g, bool video, uint32_t page);
+/* a page of the slow RAM / of the video RAM, to read */
+static inline const uint8_t* gba_ew(Gba* g, uint32_t page) {
+  const uint8_t* const p = g->ewR[page];
+  return __builtin_expect((uintptr_t)p & 1, 0) ? mem_wake(g, false, page) : p;
+}
+static inline const uint8_t* gba_vr(Gba* g, uint32_t page) {
+  const uint8_t* const p = g->vrR[page];
+  return __builtin_expect((uintptr_t)p & 1, 0) ? mem_wake(g, true, page) : p;
+}
 /* the cycles of one access of 2 (wide false) or 4 bytes at a */
 uint32_t mem_cost(const Gba* g, uint32_t a, bool wide);
 void mem_waitcnt(Gba* g);

@@ -31,7 +31,7 @@ static inline void setBit(uint32_t* set, uint32_t i) { set[i >> 5] |= 1u << (i &
 static uint32_t see(Gba* g, uint32_t a, uint32_t size) {
   uint8_t b[4] = {0, 0, 0, 0};
   switch(a >> 24) {
-    case 2: memcpy(b, g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK), size); break;
+    case 2: memcpy(b, gba_ew(g, (a >> PG_SHIFT) & (EWRAM_PAGES - 1)) + (a & PG_MASK), size); break;
     case 3: memcpy(b, g->iwram + (a & IWRAM_MASK), size); break;
     default: {   /* registers: interrupts asked for and pending, the master switch, the buttons */
       const uint32_t off = a & 0xffe;

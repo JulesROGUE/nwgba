@@ -136,7 +136,7 @@ void mem_codePage(Gba* g, uint32_t a) {
       }
       break;
     case 2:
-      g->codePtr = g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)];
+      g->codePtr = gba_ew(g, (a >> PG_SHIFT) & (EWRAM_PAGES - 1));
       g->codeCostT = 3;
       g->codeCostA = g->codeCostL = 6;
       return;
@@ -436,38 +436,283 @@ static void saveWrite(Gba* g, uint32_t a, uint32_t v) {
 
 /* --------------------------------------------------------------- pages -- */
 
-/* pages that hold nothing but zeros give their frames back */
-static void reclaim(Gba* g) {
-  for(int pass = 0; pass < 2; pass++) {
-    const uint8_t** slots = pass ? g->vrR : g->ewR;
-    uint8_t* states = pass ? g->vrS : g->ewS;
-    const int n = pass ? VRAM_PAGES : EWRAM_PAGES;
-    for(int i = 0; i < n; i++) {
-      if(states[i] != PG_RAM) continue;
-      const uint8_t* p = slots[i];
-      uint32_t any = 0;
-      for(int k = 0; k < PG_SIZE; k += 4) any |= ld32(p + k);
-      if(any) continue;
-      g->freeFrames[g->nFree++] = (uint16_t)((uint32_t)(p - g->frames) >> PG_SHIFT);
-      slots[i] = kZeroPage;
-      states[i] = PG_ZERO;
+static inline bool tagged(const uint8_t* p) { return (uintptr_t)p & 1; }
+static inline const uint8_t* untag(const uint8_t* p) { return (const uint8_t*)((uintptr_t)p & ~(uintptr_t)1); }
+static inline const uint8_t* tag(const uint8_t* p) { return (const uint8_t*)((uintptr_t)p | 1); }
+
+static uint8_t* frameTake(Gba* g) {   /* a free frame, or NULL */
+  if(!g->nFree) return NULL;
+  uint8_t* const f = g->frames + ((uint32_t)g->freeFrames[--g->nFree] << PG_SHIFT);
+  if(g->nFree < g->lowFree) g->lowFree = g->nFree;
+  return f;
+}
+static void frameGive(Gba* g, const uint8_t* f) { g->freeFrames[g->nFree++] = (uint16_t)((uint32_t)(f - g->frames) >> PG_SHIFT); }
+
+/* ------------------------------------------------- the tight corner --
+ *
+ * A game uses far more RAM than it touches at any one time: buffers filled
+ * once, pictures drawn in advance, tables mostly empty. When the frames of
+ * real RAM run short, the pages nobody touched lately are packed (zeros,
+ * and bytes that repeat a little earlier, written short) and kept several
+ * to a frame; their frames go back to the pool. A packed page is unpacked
+ * into a frame again the first time it is wanted.
+ *
+ * "Lately" is told without counting anything on the fast paths: a hand goes
+ * round the pages; a page it finds awake is put to sleep (it keeps its frame
+ * and its contents, but the pointer the fast paths follow is marked), and
+ * the first access wakes it at the cost of one slow path. A page the hand
+ * finds still asleep the next time round was not touched in between: that
+ * one is packed, if a frame is needed.
+ *
+ * The packed pages live in frames cut in equal corners (four sizes); each
+ * such frame starts with which corners are taken, and the next frame with
+ * a free corner of that size. */
+
+#define PACK_MAX 126u
+static const uint8_t kCorner[PACK_CLASSES] = {18, 36, 84, 126};   /* 4 bytes of header + 252 */
+static const uint8_t kCorners[PACK_CLASSES] = {14, 7, 3, 2};
+#define AGE_BELOW 24u   /* frames left when the hand starts going round */
+#define AGE_STEP 64u    /* pages it looks at for each frame taken after that */
+#define ALL_PAGES (EWRAM_PAGES + VRAM_PAGES)
+
+/* A page of 256 bytes written short, at most PACK_MAX bytes; 0: it does not fit.
+ *   00-7f      that many bytes + 1 follow as they are
+ *   80-bf      zeros: (low 6 bits) + 2 of them
+ *   c0-ff      (low 4 bits) + 3 bytes repeat those 1, 2 or 4 bytes back
+ *              (bits 4-5: 0, 1, 2), or as far back as the next byte + 1 says (3) */
+static uint32_t packPage(const uint8_t* s, uint8_t* out) {
+  uint8_t last[256];   /* where a pair of bytes was last seen */
+  uint32_t n = 0, i = 0, lit = 0;
+  memset(last, 0, sizeof last);
+#define LITERALS()                           \
+  while(lit) {                               \
+    const uint32_t k_ = lit > 128 ? 128 : lit; \
+    if(n + 1 + k_ > PACK_MAX) return 0;      \
+    out[n++] = (uint8_t)(k_ - 1);            \
+    memcpy(out + n, s + i - lit, k_);        \
+    n += k_;                                 \
+    lit -= k_;                               \
+  }
+  while(i < PG_SIZE) {
+    uint32_t z = 0;
+    while(i + z < PG_SIZE && z < 65 && !s[i + z]) z++;
+    const uint32_t room = PG_SIZE - i < 18 ? PG_SIZE - i : 18;
+    uint32_t best = 0, how = 0, far = 0;
+    for(uint32_t k = 0; k < 3; k++) {
+      const uint32_t d = 1u << k;
+      if(d > i) break;
+      uint32_t l = 0;
+      while(l < room && s[i + l - d] == s[i + l]) l++;
+      if(l > best) {
+        best = l;
+        how = k;
+      }
+    }
+    if(i + 1 < PG_SIZE) {
+      const uint32_t h = (s[i] * 31u + s[i + 1] * 7u) & 255, c = last[h];
+      if(c < i) {
+        uint32_t l = 0;
+        while(l < room && s[c + l] == s[i + l]) l++;
+        if(l > best + 1) {   /* one byte dearer than a repeat from close by */
+          best = l;
+          how = 3;
+          far = i - c;
+        }
+      }
+      last[h] = (uint8_t)i;
+    }
+    if(z >= 2 && z >= best) {
+      LITERALS();
+      if(n + 1 > PACK_MAX) return 0;
+      out[n++] = (uint8_t)(0x80 | (z - 2));
+      i += z;
+    } else if(best >= 3 + (how == 3)) {
+      LITERALS();
+      if(n + 2 > PACK_MAX) return 0;
+      out[n++] = (uint8_t)(0xc0 | how << 4 | (best - 3));
+      if(how == 3) out[n++] = (uint8_t)(far - 1);
+      i += best;
+    } else {
+      lit++;
+      i++;
+    }
+  }
+  LITERALS();
+#undef LITERALS
+  return n;
+}
+
+static void unpackPage(const uint8_t* in, uint8_t* out) {
+  uint32_t o = 0;
+  while(o < PG_SIZE) {
+    const uint32_t c = *in++, room = PG_SIZE - o;
+    if(c < 0x80) {
+      const uint32_t k = c + 1 < room ? c + 1 : room;
+      memcpy(out + o, in, k);
+      in += c + 1;
+      o += k;
+    } else if(c < 0xc0) {
+      uint32_t k = (c & 0x3f) + 2;
+      if(k > room) k = room;
+      memset(out + o, 0, k);
+      o += k;
+    } else {
+      uint32_t k = (c & 15) + 3, d = ((c >> 4) & 3) == 3 ? (uint32_t)*in++ + 1 : 1u << ((c >> 4) & 3);
+      if(k > room) k = room;
+      if(d > o) d = o ? o : 1;   /* never from what we wrote, but nothing must run off */
+      for(uint32_t j = 0; j < k && o; j++, o++) out[o] = out[o - d];
+      if(!o) out[o++] = 0;
     }
   }
 }
 
+/* a free corner of size class k, or NULL when no frame has one */
+static uint8_t* cornerNew(Gba* g, uint32_t k) {
+  const uint32_t at = g->slabHead[k];
+  if(!at) return NULL;
+  uint8_t* const s = g->frames + (at << PG_SHIFT);
+  uint32_t used = ld16(s), c = 0;
+  while(used >> c & 1) c++;
+  used |= 1u << c;
+  st16(s, used);
+  if(used == (1u << kCorners[k]) - 1) g->slabHead[k] = (uint16_t)(ld16(s + 2) & 0x0fff);   /* full: out of the list */
+  return s + 4 + c * kCorner[k];
+}
+/* a frame becomes a frame of corners of class k; its first corner is taken */
+static uint8_t* cornersIn(Gba* g, uint8_t* frame, uint32_t k) {
+  st16(frame, 1);
+  st16(frame + 2, g->slabHead[k] | k << 12);
+  g->slabHead[k] = (uint16_t)((uint32_t)(frame - g->frames) >> PG_SHIFT);
+  g->nSlabs++;
+  return frame + 4;
+}
+static void cornerFree(Gba* g, const uint8_t* corner) {
+  const uint32_t at = (uint32_t)(corner - g->frames) >> PG_SHIFT;
+  uint8_t* const s = g->frames + (at << PG_SHIFT);
+  const uint32_t k = ld16(s + 2) >> 12, full = (1u << kCorners[k]) - 1;
+  uint32_t used = ld16(s);
+  const bool wasFull = used == full;
+  used &= ~(1u << ((uint32_t)(corner - s - 4) / kCorner[k]));
+  st16(s, used);
+  if(wasFull) {   /* it has room again: back in the list */
+    st16(s + 2, g->slabHead[k] | k << 12);
+    g->slabHead[k] = (uint16_t)at;
+  }
+  if(used) return;
+  /* nothing left in it: out of the list, and the frame is free again */
+  const uint32_t next = ld16(s + 2) & 0x0fff;
+  if(g->slabHead[k] == at) {
+    g->slabHead[k] = (uint16_t)next;
+  } else {
+    for(uint32_t p = g->slabHead[k]; p;) {
+      uint8_t* const ps = g->frames + (p << PG_SHIFT);
+      const uint32_t pn = ld16(ps + 2) & 0x0fff;
+      if(pn == at) {
+        st16(ps + 2, next | k << 12);
+        break;
+      }
+      p = pn;
+    }
+  }
+  g->nSlabs--;
+  frameGive(g, s);
+}
+
+/* The hand goes on, over at most n pages. Pages awake are put to sleep. With
+ * need: pages still asleep are packed (or found to be all zeros), until a
+ * frame is free. */
+static void sweep(Gba* g, uint32_t n, bool need) {
+  while(n--) {
+    const uint32_t i = g->hand;
+    g->hand = (uint16_t)(i + 1 < ALL_PAGES ? i + 1 : 0);
+    if(!g->hand && (++g->handTurns & 3) == 0) memset(g->hard, 0, sizeof g->hard);   /* now and then, another chance */
+    const bool video = i >= EWRAM_PAGES;
+    const uint8_t** const slot = video ? &g->vrR[i - EWRAM_PAGES] : &g->ewR[i];
+    uint8_t* const state = video ? &g->vrS[i - EWRAM_PAGES] : &g->ewS[i];
+    if(*state != PG_RAM && *state != PG_IDLE) continue;
+    /* in use right now: the code that runs, the rows of the picture being drawn */
+    if(untag(*slot) == g->codePtr || (video && (i - EWRAM_PAGES == g->pinV[0] || i - EWRAM_PAGES == g->pinV[1]))) continue;
+    if(*state == PG_RAM) {
+      if(g->hard[i >> 3] >> (i & 7) & 1) continue;
+      *slot = tag(*slot);
+      *state = PG_IDLE;
+      continue;
+    }
+    if(!need) continue;
+    uint8_t* const f = (uint8_t*)untag(*slot);
+    uint32_t any = 0;
+    for(int k = 0; k < PG_SIZE; k += 4) any |= ld32(f + k);
+    if(!any) {
+      frameGive(g, f);
+      *slot = kZeroPage;
+      *state = PG_ZERO;
+      return;
+    }
+    uint8_t small[PACK_MAX];
+    const uint32_t size = packPage(f, small);
+    if(!size) {   /* it does not pack: left awake, and not tried again for a while */
+      g->hard[i >> 3] |= (uint8_t)(1u << (i & 7));
+      *slot = f;
+      *state = PG_RAM;
+      continue;
+    }
+    uint32_t k = 0;
+    while(kCorner[k] < size) k++;
+    uint8_t* corner = cornerNew(g, k);
+    const bool freed = corner != NULL;
+    if(freed) frameGive(g, f);
+    else corner = cornersIn(g, f, k);   /* no corner of that size left: its own frame becomes one of them */
+    memcpy(corner, small, size);
+    *slot = tag(corner);
+    *state = PG_PACKED;
+    g->nPacked++;
+    g->packs++;
+    if(freed) return;
+  }
+}
+
+/* a frame for a page; frame 0 when there is none to be had (kept for this, so that nothing else breaks) */
+static uint8_t* frameGet(Gba* g) {
+  if(g->nFree <= AGE_BELOW) {
+    if(g->nFree) sweep(g, AGE_STEP, false);
+    else sweep(g, 2 * ALL_PAGES, true);   /* twice round at most: once to put to sleep, once to pack */
+  }
+  uint8_t* const f = frameTake(g);
+  if(f) return f;
+  g->outOfMemory = true;
+  g->lowFree = 0;
+  return g->frames;
+}
+
+/* a page asleep or packed becomes plain real RAM again */
+static uint8_t* wake(Gba* g, const uint8_t** slot, uint8_t* state) {
+  if(*state == PG_IDLE) {
+    *slot = untag(*slot);
+    *state = PG_RAM;
+    g->wakes++;
+    return (uint8_t*)*slot;
+  }
+  const uint8_t* const corner = untag(*slot);
+  uint8_t* const f = frameGet(g);
+  if(g->outOfMemory) return f;
+  unpackPage(corner, f);
+  cornerFree(g, corner);
+  *slot = f;
+  *state = PG_RAM;
+  g->nPacked--;
+  g->unpacks++;
+  return f;
+}
+
+const uint8_t* mem_wake(Gba* g, bool video, uint32_t page) {
+  return video ? wake(g, &g->vrR[page], &g->vrS[page]) : wake(g, &g->ewR[page], &g->ewS[page]);
+}
+
 uint8_t* mem_frame(Gba* g, const uint8_t** slot, uint8_t* state) {
   if(*state == PG_RAM) return (uint8_t*)*slot;
-  if(!g->nFree) reclaim(g);
-  uint8_t* f;
-  if(g->nFree) {
-    f = g->frames + ((uint32_t)g->freeFrames[--g->nFree] << PG_SHIFT);
-    if(g->nFree < g->lowFree) g->lowFree = g->nFree;
-  } else {
-    /* nowhere to put it: the game cannot go on; frame 0 is kept for this, so that nothing else breaks */
-    g->outOfMemory = true;
-    g->lowFree = 0;
-    return g->frames;
-  }
+  if(*state >= PG_IDLE) return wake(g, slot, state);
+  uint8_t* const f = frameGet(g);
+  if(g->outOfMemory) return f;
   memcpy(f, *slot, PG_SIZE);
   *slot = f;
   *state = PG_RAM;
@@ -477,7 +722,14 @@ uint8_t* mem_frame(Gba* g, const uint8_t** slot, uint8_t* state) {
 
 /* the page now reads from data that never changes (kZeroPage: nothing) */
 static void pageFix(Gba* g, const uint8_t** slot, uint8_t* state, const uint8_t* data) {
-  if(*state == PG_RAM) g->freeFrames[g->nFree++] = (uint16_t)((uint32_t)(*slot - g->frames) >> PG_SHIFT);
+  if(*state == PG_RAM) {
+    frameGive(g, *slot);
+  } else if(*state == PG_IDLE) {
+    frameGive(g, untag(*slot));
+  } else if(*state == PG_PACKED) {
+    cornerFree(g, untag(*slot));
+    g->nPacked--;
+  }
   *slot = data;
   *state = data == kZeroPage ? PG_ZERO : PG_FIXED;
   g->codeLen = 0;
@@ -507,14 +759,14 @@ static inline bool pageOf(Gba* g, uint32_t a, const uint8_t*** slot, uint8_t** s
 static uint32_t r8(Gba* g, uint32_t a) {
   switch(a >> 24) {
     case 0: g->cycles++; return a < sizeof bios_stub ? bios_stub[a] : 0;
-    case 2: g->cycles += 3; return g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)][a & PG_MASK];
+    case 2: g->cycles += 3; return gba_ew(g, (a >> PG_SHIFT) & (EWRAM_PAGES - 1))[a & PG_MASK];
     case 3: g->cycles++; return g->iwram[a & IWRAM_MASK];
     case 4: g->cycles++; return (ioRead(g, a & 0x00fffffeu) >> ((a & 1) * 8)) & 0xff;
     case 5: g->cycles++; return g->pal[a & 0x3ff];
     case 6: {
       const uint32_t o = vramOff(a);
       g->cycles++;
-      return g->vrR[o >> PG_SHIFT][o & PG_MASK];
+      return gba_vr(g, o >> PG_SHIFT)[o & PG_MASK];
     }
     case 7: g->cycles++; return g->oam[a & 0x3ff];
     case 8: case 9: case 10: case 11: case 12: case 13:
@@ -528,14 +780,14 @@ static uint32_t r8(Gba* g, uint32_t a) {
 static uint32_t r16(Gba* g, uint32_t a) {
   switch(a >> 24) {
     case 0: g->cycles++; return a < sizeof bios_stub ? ld16(bios_stub + a) : 0;
-    case 2: g->cycles += 3; return ld16(g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK));
+    case 2: g->cycles += 3; return ld16(gba_ew(g, (a >> PG_SHIFT) & (EWRAM_PAGES - 1)) + (a & PG_MASK));
     case 3: g->cycles++; return ld16(g->iwram + (a & IWRAM_MASK));
     case 4: g->cycles++; return ioRead(g, a & 0x00fffffeu);
     case 5: g->cycles++; return ld16(g->pal + (a & 0x3fe));
     case 6: {
       const uint32_t o = vramOff(a);
       g->cycles++;
-      return ld16(g->vrR[o >> PG_SHIFT] + (o & PG_MASK));
+      return ld16(gba_vr(g, o >> PG_SHIFT) + (o & PG_MASK));
     }
     case 7: g->cycles++; return ld16(g->oam + (a & 0x3fe));
     case 8: case 9: case 10: case 11: case 12: case 13: {
@@ -551,14 +803,14 @@ static uint32_t r16(Gba* g, uint32_t a) {
 static uint32_t r32(Gba* g, uint32_t a) {
   switch(a >> 24) {
     case 0: g->cycles++; return a < sizeof bios_stub ? ld32(bios_stub + a) : 0;
-    case 2: g->cycles += 6; return ld32(g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK));
+    case 2: g->cycles += 6; return ld32(gba_ew(g, (a >> PG_SHIFT) & (EWRAM_PAGES - 1)) + (a & PG_MASK));
     case 3: g->cycles++; return ld32(g->iwram + (a & IWRAM_MASK));
     case 4: g->cycles++; return ioRead(g, a & 0x00fffffcu) | ioRead(g, (a & 0x00fffffcu) + 2) << 16;
     case 5: g->cycles += 2; return ld32(g->pal + (a & 0x3fc));
     case 6: {
       const uint32_t o = vramOff(a);
       g->cycles += 2;
-      return ld32(g->vrR[o >> PG_SHIFT] + (o & PG_MASK));
+      return ld32(gba_vr(g, o >> PG_SHIFT) + (o & PG_MASK));
     }
     case 7: g->cycles++; return ld32(g->oam + (a & 0x3fc));
     case 8: case 9: case 10: case 11: case 12: case 13: {
@@ -612,6 +864,7 @@ static inline void put32(Gba* g, uint32_t a, uint8_t* p, uint32_t v) {
     const uint8_t** const s_ = (slot);                                         \
     uint8_t* const t_ = (state);                                               \
     const uint32_t o_ = (off), v_ = (v) & (uint32_t)(0xffffffffu >> (32 - bits)); \
+    if(*t_ >= PG_IDLE) wake(g, s_, t_);                                        \
     if(*t_ != PG_RAM && ld##bits(*s_ + o_) == v_) break;                       \
     put##bits(g, a, mem_frame(g, s_, t_) + o_, v_);                            \
   } while(0)
@@ -728,6 +981,7 @@ void mem_poke8(Gba* g, uint32_t a, uint32_t v) {
       uint8_t* state;
       uint32_t off;
       pageOf(g, a, &slot, &state, &off);
+      if(*state >= PG_IDLE) wake(g, slot, state);
       if(*state != PG_RAM && (*slot)[off] == (v & 0xff)) return;
       mem_frame(g, slot, state)[off] = (uint8_t)v;
       return;
@@ -751,8 +1005,12 @@ static const uint8_t* peek(Gba* g, uint32_t a, uint32_t n, bool fixed) {
       uint8_t* state;
       uint32_t off;
       pageOf(g, a, &slot, &state, &off);
-      if(fixed && *state == PG_RAM) return NULL;
-      if(off + n <= PG_SIZE) return *slot + off;
+      if(fixed && *state >= PG_RAM) return NULL;
+      if(off + n <= PG_SIZE) {
+        if(*state >= PG_IDLE) wake(g, slot, state);
+        return *slot + off;
+      }
+      if(*state >= PG_RAM) return NULL;   /* two pages of real RAM do not follow on */
       /* across two pages: only data that follows on */
       const uint8_t** slot2;
       uint8_t* state2;
@@ -797,13 +1055,19 @@ static void store(Gba* g, uint32_t dst, const uint8_t* s, uint32_t n) {
       const uint8_t** slot;
       uint8_t* state;
       uint32_t off;
+      /* waking the page or taking a frame may put others to sleep, even pack
+       * them (the tight corner): the bytes are put aside first */
+      uint8_t aside[PG_SIZE];
       pageOf(g, dst, &slot, &state, &off);
+      if(*state >= PG_IDLE) {
+        memcpy(aside, s, n);
+        s = aside;
+        wake(g, slot, state);
+      }
       if(*state == PG_RAM) {
         memmove((uint8_t*)*slot + off, s, n);
       } else if(memcmp(*slot + off, s, n)) {
-        /* taking a frame may shuffle others (mem_frame): the bytes are put aside first */
-        uint8_t aside[PG_SIZE];
-        memcpy(aside, s, n);
+        if(s != aside) memcpy(aside, s, n);
         memcpy(mem_frame(g, slot, state) + off, aside, n);
       }
       return;
@@ -932,6 +1196,13 @@ void mem_reset(Gba* g) {
   for(uint32_t i = g->nFrames; i > 1; i--) g->freeFrames[g->nFree++] = (uint16_t)(i - 1);
   g->lowFree = g->nFree;
   g->outOfMemory = false;
+  g->hand = 0;
+  g->handTurns = 0;
+  memset(g->slabHead, 0, sizeof g->slabHead);
+  g->pinV[0] = g->pinV[1] = 0xffff;
+  g->nPacked = g->nSlabs = 0;
+  memset(g->hard, 0, sizeof g->hard);
+  g->packs = g->unpacks = g->wakes = 0;
   g->romLen = g->rom2Len = 0;
   memset(g->romW, 0, sizeof g->romW);
   g->romWNext = 0;

@@ -139,6 +139,39 @@ static void run(uint32_t drawEvery, const char* label) {
   out(" at most\n");
 }
 
+#ifdef BENCH_PGO
+/* The counting build (tools/pgo.sh): at the end, how many times each branch
+ * of the core was taken goes to a file on the PC, through the simulator. */
+#include <gcov.h>
+extern const struct gcov_info* const __gcov_info_start[];
+extern const struct gcov_info* const __gcov_info_end[];
+static uint32_t countsFile;
+static void countsName(const char* name, void* arg) {
+  (void)arg;
+  uint32_t a[3] = {(uint32_t)name, 5 /* "wb" */, (uint32_t)strlen(name)};
+  countsFile = semi(0x01, a);
+}
+static void countsPut(const void* d, unsigned n, void* arg) {
+  (void)arg;
+  uint32_t a[3] = {countsFile, (uint32_t)d, n};
+  semi(0x05, a);
+}
+static void* countsRoom(unsigned n, void* arg) {
+  static uint8_t room[4096];
+  static unsigned used;
+  (void)arg;
+  void* p = room + used;
+  used += (n + 7) & ~7u;
+  return used <= sizeof room ? p : 0;
+}
+static void countsOut(void) {
+  for(const struct gcov_info* const* i = __gcov_info_start; i != __gcov_info_end; i++) {
+    __gcov_info_to_gcda(*i, countsName, countsPut, countsRoom, 0);
+    semi(0x02, &countsFile);
+  }
+}
+#endif
+
 int main(void) {
   clockStart();
 #if defined(BENCH_ONE) && BENCH_ONE == 0
@@ -153,6 +186,9 @@ int main(void) {
   out("checksum ");
   outNum(checksum);
   out("\n");
+#ifdef BENCH_PGO
+  countsOut();
+#endif
   quit();
   return 0;
 }

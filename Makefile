@@ -42,12 +42,16 @@ $(BUILD)/icon.o: numworks/icon.png | $(BUILD)
 # The core is compiled as one piece (core/all.c): the compiler sees it whole,
 # and the code that results misses the processor's small cache less often
 # than what link-time optimisation made of the separate files.
-$(BUILD)/nwa/all.o: core/all.c $(CORE) $(HEADERS)
+# With counts of what really runs (pgo/all.gcda, see tools/pgo.sh), the
+# compiler keeps the rare parts of each function out of the way.
+PGO_FLAGS = $(if $(wildcard pgo/all.gcda),-fbranch-probabilities -Wno-missing-profile -Wno-error=coverage-mismatch)
+$(BUILD)/nwa/all.o: core/all.c $(CORE) $(HEADERS) $(wildcard pgo/all.gcda)
 	@mkdir -p $(BUILD)/nwa
-	$(ARM_CC) $(ARM_CFLAGS) -c $< -o $@
+	@if [ -f pgo/all.gcda ]; then cp pgo/all.gcda $(BUILD)/nwa/all.gcda; fi
+	$(ARM_CC) $(ARM_CFLAGS) $(PGO_FLAGS) -c $< -o $@
 
-$(BUILD)/nwgba.nwa: $(BUILD)/nwa/all.o core/flash.c numworks/main.c $(HEADERS) $(BUILD)/icon.o
-	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) $(BUILD)/nwa/all.o core/flash.c numworks/main.c $(BUILD)/icon.o -o $@
+$(BUILD)/nwgba.nwa: $(BUILD)/nwa/all.o core/flash.c numworks/main.c numworks/app.ld $(HEADERS) $(BUILD)/icon.o
+	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) -Wl,-T,numworks/app.ld $(BUILD)/nwa/all.o core/flash.c numworks/main.c $(BUILD)/icon.o -o $@
 
 # a test app: can code run from RAM on the calculator, and what is it worth (numworks/ramtest.c)
 ramtest: $(BUILD)/ramtest.nwa
@@ -84,9 +88,10 @@ QEMU = qemu-system-arm -M mps2-an500 -cpu cortex-m7 -nographic -monitor none -se
 BENCH_CPU = -std=c11 -O2 -g -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-sp-d16 \
   -fdata-sections -ffunction-sections -DNWGBA_CALC
 BENCH_OBJS = $(BUILD)/bench/all.o
-$(BUILD)/bench/all.o: core/all.c $(CORE) $(HEADERS)
+$(BUILD)/bench/all.o: core/all.c $(CORE) $(HEADERS) $(wildcard pgo/all.gcda)
 	@mkdir -p $(BUILD)/bench
-	$(ARM_CC) $(BENCH_CPU) -c $< -o $@
+	@if [ -f pgo/all.gcda ]; then cp pgo/all.gcda $(BUILD)/bench/all.gcda; fi
+	$(ARM_CC) $(BENCH_CPU) $(PGO_FLAGS) -c $< -o $@
 bench-elf: $(BENCH_OBJS) bench/main.c bench/startup.c bench/mps2.ld $(HEADERS) | $(BUILD)
 	@test -n "$(ROM)" || (echo "usage: make bench ROM=game.gba"; exit 1)
 	printf '.section .game,"a"\n.global bench_rom\n.balign 4\nbench_rom:\n.incbin "%s"\nbench_rom_end:\n.section .rodata\n.global bench_rom_size\n.balign 4\nbench_rom_size:\n.word bench_rom_end - bench_rom\n' "$(ROM)" > $(BUILD)/bench_rom.S

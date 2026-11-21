@@ -876,14 +876,16 @@ static const uint8_t kPop8[256] = {B6(0), B6(1), B6(1), B6(2)};   /* bits set in
 #define RD(bits, addr, dst, mask, costE, costR)                                              \
   do {                                                                                       \
     const uint32_t a_ = (addr);                                                              \
+    const uint8_t* q_;                                                                       \
     if((a_ & (0xff000000u | (mask))) == 0x03000000u) {                                       \
       dst = ld##bits(g->iwram + (a_ & IWRAM_MASK));                                          \
       left -= 1;                                                                             \
     } else if((a_ & (0xfe000000u | (mask))) == 0x08000000u && (a_ & 0x01ffffffu) - g->romBase < g->romLen) { \
       dst = ld##bits(g->romPtr + ((a_ & 0x01ffffffu) - g->romBase));                         \
       left -= (int32_t)(costR);                                                              \
-    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u) {                                \
-      dst = ld##bits(g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a_ & PG_MASK));         \
+    } else if((a_ & (0xff000000u | (mask))) == 0x02000000u &&                                \
+              !((uintptr_t)(q_ = g->ewR[(a_ >> PG_SHIFT) & (EWRAM_PAGES - 1)]) & 1)) {       \
+      dst = ld##bits(q_ + (a_ & PG_MASK));   /* (a page asleep or packed: the slow way wakes it) */ \
       left -= (costE);                                                                       \
     } else {                                                                                 \
       SYNC_OUT();                                                                            \
@@ -1013,6 +1015,8 @@ void cpu_run(Gba* g) {
   uint32_t* const r = c->r;
   const uint8_t* page;
   uint32_t base, len, cost, off;
+  uint32_t ma = 0;     /* a load or a store: the address, */
+  uint32_t* md = r;    /* and the register read into or written from */
   if(g->tracing) runWatched(g);
   int32_t left = (int32_t)(g->target - g->cycles);
   if(left <= 0) return;
@@ -1170,71 +1174,45 @@ thumb_enter : {
         if(left <= 0) goto out;
         goto arm_enter;
       }
+      /* Loads and stores: each kind of instruction only works out the address
+       * (ma) and the register (md), and goes to the one copy of the access
+       * itself, after the switch. The interpreter has to stay small: the
+       * processor keeps 8 KB of code at hand, and reads the rest again from
+       * the flash chip. */
       case 0x48 ... 0x4f: {   /* a constant from the code itself */
         const uint32_t a = (PC4 & ~2u) + (op & 0xff) * 4;
-        uint32_t v;
+        md = &r[(op >> 8) & 7];
         if(a - base <= len - 4) {
-          v = ld32(page + (a - base));
-          left -= (int32_t)g->codeCostL;
-        } else {
-          RD32(a, v);
+          *md = ld32(page + (a - base));
+          left -= (int32_t)g->codeCostL + 1;
+          continue;
         }
-        r[(op >> 8) & 7] = v;
-        left--;
-        continue;
+        ma = a;
+        goto t_ld32;
       }
-      case 0x50 ... 0x5f: {
-        const uint32_t a = r[(op >> 3) & 7] + r[(op >> 6) & 7];
-        uint32_t* const d = &r[op & 7];
-        uint32_t v;
+      case 0x50 ... 0x5f:
+        ma = r[(op >> 3) & 7] + r[(op >> 6) & 7];
+        md = &r[op & 7];
         switch((op >> 9) & 7) {
-          case 0: WR32(a, *d); continue;
-          case 1: WR16(a, *d); continue;
-          case 2: WR8(a, *d); continue;
-          case 3: RD8(a, v); *d = (uint32_t)(int8_t)v; left--; continue;
-          case 4: RD32(a, v); *d = v; left--; continue;
-          case 5: RD16(a, v); *d = v; left--; continue;
-          case 6: RD8(a, v); *d = v; left--; continue;
+          case 0: goto t_st32;
+          case 1: goto t_st16;
+          case 2: goto t_st8;
+          case 3: goto t_ld8s;
+          case 4: goto t_ld32;
+          case 5: goto t_ld16;
+          case 6: goto t_ld8;
           default:
-            if(a & 1) goto slow_t;
-            RD16(a, v);
-            *d = (uint32_t)(int16_t)v;
-            left--;
-            continue;
+            if(ma & 1) goto slow_t;
+            goto t_ld16s;
         }
-      }
-      case 0x60 ... 0x67: WR32(r[(op >> 3) & 7] + ((op >> 6) & 31) * 4, r[op & 7]); continue;
-      case 0x68 ... 0x6f: {
-        uint32_t v;
-        RD32(r[(op >> 3) & 7] + ((op >> 6) & 31) * 4, v);
-        r[op & 7] = v;
-        left--;
-        continue;
-      }
-      case 0x70 ... 0x77: WR8(r[(op >> 3) & 7] + ((op >> 6) & 31), r[op & 7]); continue;
-      case 0x78 ... 0x7f: {
-        uint32_t v;
-        RD8(r[(op >> 3) & 7] + ((op >> 6) & 31), v);
-        r[op & 7] = v;
-        left--;
-        continue;
-      }
-      case 0x80 ... 0x87: WR16(r[(op >> 3) & 7] + ((op >> 6) & 31) * 2, r[op & 7]); continue;
-      case 0x88 ... 0x8f: {
-        uint32_t v;
-        RD16(r[(op >> 3) & 7] + ((op >> 6) & 31) * 2, v);
-        r[op & 7] = v;
-        left--;
-        continue;
-      }
-      case 0x90 ... 0x97: WR32(r[13] + (op & 0xff) * 4, r[(op >> 8) & 7]); continue;
-      case 0x98 ... 0x9f: {
-        uint32_t v;
-        RD32(r[13] + (op & 0xff) * 4, v);
-        r[(op >> 8) & 7] = v;
-        left--;
-        continue;
-      }
+      case 0x60 ... 0x67: ma = r[(op >> 3) & 7] + ((op >> 6) & 31) * 4; md = &r[op & 7]; goto t_st32;
+      case 0x68 ... 0x6f: ma = r[(op >> 3) & 7] + ((op >> 6) & 31) * 4; md = &r[op & 7]; goto t_ld32;
+      case 0x70 ... 0x77: ma = r[(op >> 3) & 7] + ((op >> 6) & 31); md = &r[op & 7]; goto t_st8;
+      case 0x78 ... 0x7f: ma = r[(op >> 3) & 7] + ((op >> 6) & 31); md = &r[op & 7]; goto t_ld8;
+      case 0x80 ... 0x87: ma = r[(op >> 3) & 7] + ((op >> 6) & 31) * 2; md = &r[op & 7]; goto t_st16;
+      case 0x88 ... 0x8f: ma = r[(op >> 3) & 7] + ((op >> 6) & 31) * 2; md = &r[op & 7]; goto t_ld16;
+      case 0x90 ... 0x97: ma = r[13] + (op & 0xff) * 4; md = &r[(op >> 8) & 7]; goto t_st32;
+      case 0x98 ... 0x9f: ma = r[13] + (op & 0xff) * 4; md = &r[(op >> 8) & 7]; goto t_ld32;
       case 0xa0 ... 0xa7: r[(op >> 8) & 7] = (PC4 & ~2u) + (op & 0xff) * 4; continue;
       case 0xa8 ... 0xaf: r[(op >> 8) & 7] = r[13] + (op & 0xff) * 4; continue;
       case 0xb0:
@@ -1323,6 +1301,44 @@ thumb_enter : {
         if(g->codeLen != len) goto thumb_enter;
         off = r[15] - 4 - base;
         continue;
+    }
+    /* (nothing falls out of the switch: this is only reached by the gotos above) */
+    {
+      uint32_t v;
+    t_ld32:
+      RD32(ma, v);
+      *md = v;
+      left--;
+      continue;
+    t_ld16:
+      RD16(ma, v);
+      *md = v;
+      left--;
+      continue;
+    t_ld16s:
+      RD16(ma, v);
+      *md = (uint32_t)(int16_t)v;
+      left--;
+      continue;
+    t_ld8:
+      RD8(ma, v);
+      *md = v;
+      left--;
+      continue;
+    t_ld8s:
+      RD8(ma, v);
+      *md = (uint32_t)(int8_t)v;
+      left--;
+      continue;
+    t_st32:
+      WR32(ma, *md);
+      continue;
+    t_st16:
+      WR16(ma, *md);
+      continue;
+    t_st8:
+      WR8(ma, *md);
+      continue;
     }
   }
 resync_t:

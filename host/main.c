@@ -81,14 +81,15 @@ static void memReport(const Gba* g, int frame) {
   for(int i = 0; i < n; i++) {
     const int v = i >= EWRAM_PAGES;
     const uint8_t state = v ? g->vrS[i - EWRAM_PAGES] : g->ewS[i];
-    const uint8_t* p = v ? g->vrR[i - EWRAM_PAGES] : g->ewR[i];
+    if(state == PG_PACKED) continue;   /* (reports are for runs with memory to spare) */
+    const uint8_t* p = (const uint8_t*)((uintptr_t)(v ? g->vrR[i - EWRAM_PAGES] : g->ewR[i]) & ~(uintptr_t)1);
     if(memcmp(before + (size_t)i * PG_SIZE, p, PG_SIZE)) {
       memcpy(before + (size_t)i * PG_SIZE, p, PG_SIZE);
       changed[i] = (uint32_t)frame;
     }
     if(frame % 1000 != 999) continue;
     if(state == PG_FIXED) fixed[v]++;
-    if(state != PG_RAM) continue;
+    if(state != PG_RAM && state != PG_IDLE) continue;
     real[v]++;
     const uint32_t age = (uint32_t)frame - changed[i];
     if(age < 60) hot60[v]++;
@@ -196,6 +197,10 @@ int main(int argc, char** argv) {
           (unsigned long long)(idle * 100 / (280896ull * (uint64_t)(frames ? frames : 1))));
   fprintf(stderr, "real RAM for pages: %u KB used at most, of %u KB",
           (unsigned)((g.nFrames - 1 - g.lowFree) * PG_SIZE / 1024), (unsigned)((g.nFrames - 1) * PG_SIZE / 1024));
+  if(g.packs || g.wakes)
+    fprintf(stderr, "; pages packed %u times and unpacked %u times (%u packed at the end, in %u frames), woken %u times",
+            (unsigned)g.packs, (unsigned)g.unpacks, (unsigned)g.nPacked, (unsigned)g.nSlabs, (unsigned)g.wakes);
+  if(g.outOfMemory) fprintf(stderr, "; OUT OF MEMORY");
   fprintf(stderr, "; interrupts: %u handled, %u known to do nothing", (unsigned)g.irqTaken, (unsigned)g.irqSkipped);
   if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);
   if(save_used(&g.save)) fprintf(stderr, "; save memory: %u pages of 256 bytes written", (unsigned)save_used(&g.save));

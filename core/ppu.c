@@ -8,7 +8,8 @@
  */
 #include "gba.h"
 
-static inline const uint8_t* vr(const Gba* g, uint32_t off) { return g->vrR[off >> PG_SHIFT] + (off & PG_MASK); }
+/* (a page of video RAM that sleeps or is packed is woken: see "the tight corner" in mem.c) */
+static inline const uint8_t* vr(const Gba* g, uint32_t off) { return gba_vr((Gba*)g, off >> PG_SHIFT) + (off & PG_MASK); }
 static inline uint32_t io(const Gba* g, uint32_t reg) { return g->io[reg >> 1]; }
 
 static inline uint16_t to565(uint32_t c) { return (uint16_t)((c & 0x1f) << 11 | (c & 0x3e0) << 1 | ((c >> 10) & 0x1f)); }
@@ -58,6 +59,9 @@ static inline __attribute__((always_inline)) void lineTextAny(Gba* g, int bg, in
   uint32_t mapRow = mapBase + ((sy >> 3) & 31) * 64;
   if((size & 2) && (sy & 256)) mapRow += (size & 1) ? 0x1000 : 0x800;
   /* the row of the map: 32 entries in one page, and 32 more for the wide maps */
+  /* the two rows of the map are held for the whole line: waking the tiles must not pack them */
+  ((Gba*)g)->pinV[0] = (uint16_t)(mapRow >> PG_SHIFT);
+  ((Gba*)g)->pinV[1] = (uint16_t)((size & 1) ? (mapRow + 0x800) >> PG_SHIFT : mapRow >> PG_SHIFT);
   const uint8_t* const row0 = vr(g, mapRow);
   const uint8_t* const row1 = (size & 1) ? vr(g, mapRow + 0x800) : row0;
   const uint32_t fine = sy & 7;

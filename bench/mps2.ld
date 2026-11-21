@@ -10,11 +10,17 @@ SECTIONS {
   .text : {
     KEEP(*(.vectors))
     . = ALIGN(32);
+    *(.text.hot .text.hot.*)   /* what the counts say runs often (tools/pgo.sh), in one piece */
     *(.text .text.*)
     *(.rodata .rodata.*)
     . = ALIGN(4);
   } > FLASH
   .ARM.exidx : { *(.ARM.exidx*) } > FLASH
+  .gcov_info : {   /* the counting build: one entry for each source file */
+    __gcov_info_start = .;
+    KEEP(*(.gcov_info))
+    __gcov_info_end = .;
+  } > FLASH
   .game : { KEEP(*(.game)) } > GAME
   _sidata = LOADADDR(.data);
   .data : {
