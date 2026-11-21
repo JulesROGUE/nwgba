@@ -55,11 +55,36 @@ static uint16_t band[4 * EADK_SCREEN_WIDTH];   /* four lines of the screen, sent
 
 static inline uint16_t mean(uint16_t a, uint16_t b) { return (uint16_t)((a & b) + (((a ^ b) & 0xf7de) >> 1)); }
 
+/* Sending pixels to the screen is the dear part of a picture, and most of
+ * the picture is the same from one frame to the next: a figure is kept for
+ * each line, and a band whose lines all show what they showed is not sent. */
+static uint32_t shown[GBA_H];   /* 0: to be sent whatever it holds */
+static bool bandNew;
+
+static inline void lineSeen(int y, const uint16_t* px) {
+  uint32_t h = 0;
+  for(int i = 0; i < GBA_W; i += 2) h = (h + (px[i] | (uint32_t)px[i + 1] << 16)) * 0x9e3779b1u;
+  h = (h ^ h >> 15) | 1;
+#ifdef NWGBA_SEND_ALL   /* to check the skipping against */
+  bandNew = true;
+#endif
+  if(shown[y] != h) {
+    shown[y] = h;
+    bandNew = true;
+  }
+}
+
+static void redrawAll(void) { memset(shown, 0, sizeof shown); }
+
 static void putLine(void* user, int y, const uint16_t* px) {
   (void)user;
+  lineSeen(y, px);
   if(!wide) {
     memcpy(band + (y & 3) * GBA_W, px, GBA_W * sizeof(uint16_t));
-    if((y & 3) == 3) eadk_display_push_rect((eadk_rect_t){SCREEN_X, (uint16_t)(SCREEN_Y + y - 3), GBA_W, 4}, (const eadk_color_t*)band);
+    if((y & 3) == 3) {
+      if(bandNew) eadk_display_push_rect((eadk_rect_t){SCREEN_X, (uint16_t)(SCREEN_Y + y - 3), GBA_W, 4}, (const eadk_color_t*)band);
+      bandNew = false;
+    }
     return;
   }
   /* three lines make four: the first two, the mean of the last two, the last */
@@ -73,11 +98,15 @@ static void putLine(void* user, int y, const uint16_t* px) {
   }
   const uint16_t top = (uint16_t)(WIDE_Y + y / 3 * 4);
   if(k == 2) {
-    uint16_t* m = band + 2 * EADK_SCREEN_WIDTH;
-    for(int i = 0; i < EADK_SCREEN_WIDTH; i++) m[i] = mean(m[i - EADK_SCREEN_WIDTH], m[i + EADK_SCREEN_WIDTH]);
-    eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 4}, (const eadk_color_t*)band);
+    if(bandNew) {
+      uint16_t* m = band + 2 * EADK_SCREEN_WIDTH;
+      for(int i = 0; i < EADK_SCREEN_WIDTH; i++) m[i] = mean(m[i - EADK_SCREEN_WIDTH], m[i + EADK_SCREEN_WIDTH]);
+      eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 4}, (const eadk_color_t*)band);
+    }
+    bandNew = false;
   } else if(y == GBA_H - 1) {   /* the last line stands alone */
-    eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 1}, (const eadk_color_t*)band);
+    if(bandNew) eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 1}, (const eadk_color_t*)band);
+    bandNew = false;
   }
 }
 
@@ -111,7 +140,10 @@ static void waitKey(void) {
   while(eadk_keyboard_scan()) eadk_timing_msleep(20);
 }
 
-static void clear(void) { eadk_display_push_rect_uniform(eadk_screen_rect, eadk_color_black); }
+static void clear(void) {
+  eadk_display_push_rect_uniform(eadk_screen_rect, eadk_color_black);
+  redrawAll();
+}
 
 /* ------------------------------------------------------------- input -- */
 

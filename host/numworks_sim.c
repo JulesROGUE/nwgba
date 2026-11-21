@@ -55,7 +55,9 @@ static void shot(void) {
   fclose(f);
 }
 
+static unsigned long long pixelsSent;   /* by push_rect: what the skipping of unchanged bands saves */
 void eadk_display_push_rect(eadk_rect_t r, const eadk_color_t* px) {
+  pixelsSent += (unsigned long long)r.width * r.height;
   for(int y = 0; y < r.height; y++)
     for(int x = 0; x < r.width; x++) {
       const int sx = r.x + x, sy = r.y + y;
@@ -94,7 +96,7 @@ eadk_keyboard_state_t eadk_keyboard_scan(void) {
   if(scans && scans % 300 == 0) shot();
   if(scans >= maxFrames) {
     shot();
-    printf("sim: %d frames, clock %llu ms\n", scans, (unsigned long long)clockMs);
+    printf("sim: %d frames, clock %llu ms, %llu pixels sent a frame\n", scans, (unsigned long long)clockMs, pixelsSent / (unsigned)scans);
     exit(0);
   }
   const uint16_t pad = scriptKeys(script, (uint32_t)scans);

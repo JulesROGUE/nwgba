@@ -40,12 +40,78 @@ static void shot(const Host* h, const char* dir, int n) {
   fclose(f);
 }
 
+/* --mem-report: what the pages of real RAM are worth. Each frame the pages
+ * are compared with what they held the frame before; every 1000 frames, how
+ * many are real, how many changed lately, and how small the others would
+ * get if they were packed (zeros in runs, repeats of the last few bytes). */
+static uint32_t packedSize(const uint8_t* p) {
+  uint32_t out = 0;
+  for(int i = 0; i < PG_SIZE;) {
+    int best = 0;
+    for(int d = 1; d <= 64 && d <= i; d++) {   /* a repeat of something close by */
+      int n = 0;
+      while(i + n < PG_SIZE && n < 66 && p[i + n - d] == p[i + n]) n++;
+      if(n > best) best = n;
+    }
+    int z = 0;
+    while(i + z < PG_SIZE && p[i + z] == 0) z++;
+    if(z >= 2 && z >= best) {
+      out += z > 64 ? 2 : 1;
+      i += z;
+    } else if(best >= 3) {
+      out += 2;
+      i += best;
+    } else {
+      out += 1 + (i % 8 == 0);   /* a plain byte, and a byte of flags for eight */
+      i++;
+    }
+  }
+  return out > PG_SIZE ? PG_SIZE : out;
+}
+static void memReport(const Gba* g, int frame) {
+  static uint8_t* before;
+  static uint32_t* changed;
+  const int n = EWRAM_PAGES + VRAM_PAGES;
+  if(!before) {
+    before = calloc((size_t)n, PG_SIZE);
+    changed = calloc((size_t)n, sizeof *changed);
+  }
+  int real[2] = {0, 0}, hot60[2] = {0, 0}, hot600[2] = {0, 0}, fixed[2] = {0, 0};
+  uint32_t cold[2] = {0, 0}, coldPacked[2] = {0, 0};
+  for(int i = 0; i < n; i++) {
+    const int v = i >= EWRAM_PAGES;
+    const uint8_t state = v ? g->vrS[i - EWRAM_PAGES] : g->ewS[i];
+    const uint8_t* p = v ? g->vrR[i - EWRAM_PAGES] : g->ewR[i];
+    if(memcmp(before + (size_t)i * PG_SIZE, p, PG_SIZE)) {
+      memcpy(before + (size_t)i * PG_SIZE, p, PG_SIZE);
+      changed[i] = (uint32_t)frame;
+    }
+    if(frame % 1000 != 999) continue;
+    if(state == PG_FIXED) fixed[v]++;
+    if(state != PG_RAM) continue;
+    real[v]++;
+    const uint32_t age = (uint32_t)frame - changed[i];
+    if(age < 60) hot60[v]++;
+    if(age < 600) hot600[v]++;
+    else {
+      cold[v]++;
+      coldPacked[v] += packedSize(p);
+    }
+  }
+  if(frame % 1000 != 999) return;
+  fprintf(stderr, "frame %d: real RAM %d KB (work %d, video %d); read from the pack %d KB; changed in the last second %d KB, in the last 10 s %d KB; "
+          "the rest, %d KB, would pack into %d KB (work %d -> %d, video %d -> %d)\n", frame + 1, (real[0] + real[1]) / 4, real[0] / 4, real[1] / 4,
+          (fixed[0] + fixed[1]) / 4, (hot60[0] + hot60[1]) / 4, (hot600[0] + hot600[1]) / 4, (int)(cold[0] + cold[1]) / 4,
+          (int)(coldPacked[0] + coldPacked[1]) / 1024, (int)cold[0] / 4, (int)coldPacked[0] / 1024, (int)cold[1] / 4, (int)coldPacked[1] / 1024);
+}
+
 int main(int argc, char** argv) {
   if(argc < 2) {
     fprintf(stderr, "usage: nwgba-host GAME.gba|GAME.pack [--frames N] [--dump DIR] [--every K] [--keys \"F:KEYS ...\"] [--hash N] [--ram KB]\n");
     return 1;
   }
   int frames = 600, every = 60, hashEvery = 0, ramKb = 0;
+  bool report = false;
   const char* dump = NULL;
   const char* keys = NULL;
   for(int i = 2; i < argc; i++) {
@@ -55,6 +121,7 @@ int main(int argc, char** argv) {
     else if(!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
     else if(!strcmp(argv[i], "--hash") && i + 1 < argc) hashEvery = atoi(argv[++i]);   /* prints a checksum of the picture every N frames */
     else if(!strcmp(argv[i], "--ram") && i + 1 < argc) ramKb = atoi(argv[++i]);
+    else if(!strcmp(argv[i], "--mem-report")) report = true;
   }
   FILE* f = fopen(argv[1], "rb");
   if(!f) {
@@ -106,6 +173,7 @@ int main(int argc, char** argv) {
     idle += g.idleCycles;
     g.idleCycles = 0;
     if(g.instrs > busiest) busiest = g.instrs;
+    if(report) memReport(&g, i);
     if(g.outOfMemory) {
       fprintf(stderr, "frame %d: out of memory\n", i + 1);
       frames = i + 1;
