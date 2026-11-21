@@ -37,6 +37,7 @@ static uint16_t screen[EADK_SCREEN_WIDTH * EADK_SCREEN_HEIGHT];
 static uint64_t clockMs;
 static int scans, maxFrames, shots, msPerFrame = 10;
 static bool started;
+static int sinceScan;
 static const char* outDir;
 static const char* script;
 
@@ -98,7 +99,7 @@ eadk_keyboard_state_t eadk_keyboard_scan(void) {
   }
   const uint16_t pad = scriptKeys(script, (uint32_t)scans);
   scans++;
-  clockMs += (uint64_t)msPerFrame;
+  sinceScan = 0;
   eadk_keyboard_state_t k = 0;
   if(pad & GBA_UP) k |= (eadk_keyboard_state_t)1 << eadk_key_up;
   if(pad & GBA_DOWN) k |= (eadk_keyboard_state_t)1 << eadk_key_down;
@@ -110,11 +111,16 @@ eadk_keyboard_state_t eadk_keyboard_scan(void) {
   if(pad & GBA_START) k |= (eadk_keyboard_state_t)1 << eadk_key_alpha;
   if(pad & GBA_L) k |= (eadk_keyboard_state_t)1 << eadk_key_exp;
   if(pad & GBA_R) k |= (eadk_keyboard_state_t)1 << eadk_key_power;
-  if(scans == 400) k |= (eadk_keyboard_state_t)1 << eadk_key_zero;   /* the figures in the margin, once */
+  if(scans == 400) k |= (eadk_keyboard_state_t)1 << eadk_key_zero;   /* the figures at the bottom, once */
+  if(scans == 5000) k |= (eadk_keyboard_state_t)1 << eadk_key_one;   /* and the picture as it is, from there on */
   return k;
 }
 
-uint64_t eadk_timing_millis(void) { return clockMs; }
+/* the app looks at the clock before and after each frame: the frame's cost goes in between */
+uint64_t eadk_timing_millis(void) {
+  if(started && ++sinceScan == 2) clockMs += (uint64_t)msPerFrame;
+  return clockMs;
+}
 void eadk_timing_msleep(uint32_t ms) { clockMs += ms; }
 void eadk_timing_usleep(uint32_t us) { clockMs += us / 1000; }
 uint32_t eadk_random(void) { return 4; }

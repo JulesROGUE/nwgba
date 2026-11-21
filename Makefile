@@ -3,7 +3,7 @@
 CC ?= gcc
 CFLAGS ?= -O2 -g -Wall -Wextra -std=c11
 BUILD = build
-CORE = core/gba.c core/cpu.c core/mem.c core/ppu.c core/bios.c core/pack.c core/save.c
+CORE = core/gba.c core/cpu.c core/mem.c core/ppu.c core/bios.c core/pack.c core/save.c core/irqm.c
 HEADERS = $(wildcard core/*.h)
 
 .PHONY: all host clean

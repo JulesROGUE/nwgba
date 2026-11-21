@@ -8,11 +8,14 @@
  * other memories (core/gba.h), and at the very end what the game saves
  * (core/save.h).
  *
- * The picture (240 x 160) is shown as it is, in the middle of the screen.
+ * The picture (240 x 160) is stretched to the width of the screen (320 x
+ * 213: one pixel in four and one line in four are the mean of their
+ * neighbours), or shown as it is in the middle: the 1 key switches.
  *
  *   arrows: the pad      OK: A        Back: B
  *   shift: Select        alpha or EXE: Start
- *   e^x: L               10^x: R      0: figures in the margin
+ *   e^x: L               10^x: R
+ *   1: picture stretched or not       0: figures at the bottom
  *   Home leaves the app (the calculator does that by itself).
  */
 #include <eadk.h>
@@ -40,19 +43,42 @@ extern uint8_t _heap_end;
 
 #define SCREEN_X ((EADK_SCREEN_WIDTH - GBA_W) / 2)
 #define SCREEN_Y ((EADK_SCREEN_HEIGHT - GBA_H) / 2)
-#define BAND 4            /* lines sent to the display at a time */
+#define WIDE_H (GBA_H * 4 / 3)                       /* 213 lines */
+#define WIDE_Y ((EADK_SCREEN_HEIGHT - WIDE_H) / 2)
 #define MAX_SKIP 3        /* frames in a row that may go undrawn to keep up */
 #define SAVE_PAGES 32     /* 8 KB of the game's save memory can be written */
 #define FRAME_US 16743    /* 59.73 frames a second */
 
 static Gba gba;
-static uint16_t band[BAND * GBA_W];
+static bool wide = true;
+static uint16_t band[4 * EADK_SCREEN_WIDTH];   /* four lines of the screen, sent together */
+
+static inline uint16_t mean(uint16_t a, uint16_t b) { return (uint16_t)((a & b) + (((a ^ b) & 0xf7de) >> 1)); }
 
 static void putLine(void* user, int y, const uint16_t* px) {
   (void)user;
-  memcpy(band + (y % BAND) * GBA_W, px, GBA_W * sizeof(uint16_t));
-  if(y % BAND == BAND - 1)
-    eadk_display_push_rect((eadk_rect_t){SCREEN_X, (uint16_t)(SCREEN_Y + y - (BAND - 1)), GBA_W, BAND}, (const eadk_color_t*)band);
+  if(!wide) {
+    memcpy(band + (y & 3) * GBA_W, px, GBA_W * sizeof(uint16_t));
+    if((y & 3) == 3) eadk_display_push_rect((eadk_rect_t){SCREEN_X, (uint16_t)(SCREEN_Y + y - 3), GBA_W, 4}, (const eadk_color_t*)band);
+    return;
+  }
+  /* three lines make four: the first two, the mean of the last two, the last */
+  const int k = y % 3;
+  uint16_t* out = band + (k == 2 ? 3 : k) * EADK_SCREEN_WIDTH;
+  for(int i = 0; i < GBA_W; i += 3, out += 4) {   /* and three pixels make four, the same way */
+    out[0] = px[i];
+    out[1] = px[i + 1];
+    out[2] = mean(px[i + 1], px[i + 2]);
+    out[3] = px[i + 2];
+  }
+  const uint16_t top = (uint16_t)(WIDE_Y + y / 3 * 4);
+  if(k == 2) {
+    uint16_t* m = band + 2 * EADK_SCREEN_WIDTH;
+    for(int i = 0; i < EADK_SCREEN_WIDTH; i++) m[i] = mean(m[i - EADK_SCREEN_WIDTH], m[i + EADK_SCREEN_WIDTH]);
+    eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 4}, (const eadk_color_t*)band);
+  } else if(y == GBA_H - 1) {   /* the last line stands alone */
+    eadk_display_push_rect((eadk_rect_t){0, top, EADK_SCREEN_WIDTH, 1}, (const eadk_color_t*)band);
+  }
 }
 
 /* ------------------------------------------------------------- text -- */
@@ -107,26 +133,30 @@ static uint16_t readPad(eadk_keyboard_state_t k) {
 
 /* ------------------------------------------------------------- stats -- */
 
-/* In the left margin (40 pixels: five small characters), with the 0 key:
- * pictures drawn per second, speed in percent, RAM the game's pages use and
- * RAM still free for them, both in KB. */
-static void statLine(int row, uint32_t value, char unit) {
-  char buf[12];
-  char* end = putNum(buf, value);
-  if(unit) *end++ = unit;
-  *end = 0;
-  char out[6] = {' ', ' ', ' ', ' ', ' ', 0};
-  int n = (int)(end - buf);
-  if(n > 5) n = 5;
-  memcpy(out + 5 - n, buf, (size_t)n);
-  eadk_display_draw_string(out, (eadk_point_t){2, (uint16_t)(SCREEN_Y + row * 16)}, false, 0xffe0, eadk_color_black);
-}
-
-static void drawStats(uint32_t fps, uint32_t speed) {
-  statLine(0, fps, 0);
-  statLine(1, speed, '%');
-  statLine(2, (gba.nFrames - 1 - gba.nFree) * PG_SIZE / 1024, 'K');
-  statLine(3, gba.nFree * PG_SIZE / 1024, 'K');
+/* With the 0 key, a line at the bottom of the screen:
+ *   pictures drawn a second, speed in percent, RAM the game's pages use and
+ *   RAM free for them (KB), milliseconds for a frame drawn and for one not
+ *   drawn, interrupts handled per frame and interrupts known to do nothing. */
+static void drawStats(uint32_t fps, uint32_t speed, uint32_t msDrawn, uint32_t msPlain, uint32_t irqs, uint32_t skipped) {
+  char buf[64];
+  char* p = putNum(buf, fps);
+  p = putStr(p, "i/s ");
+  p = putNum(p, speed);
+  p = putStr(p, "% ");
+  p = putNum(p, (gba.nFrames - 1 - gba.nFree) * PG_SIZE / 1024);
+  p = putStr(p, "+");
+  p = putNum(p, gba.nFree * PG_SIZE / 1024);
+  p = putStr(p, "K ");
+  p = putNum(p, msDrawn);
+  p = putStr(p, "/");
+  p = putNum(p, msPlain);
+  p = putStr(p, "ms ");
+  p = putNum(p, irqs);
+  p = putStr(p, "+");
+  p = putNum(p, skipped);
+  p = putStr(p, "      ");
+  buf[45] = 0;   /* the width of the screen in small characters */
+  eadk_display_draw_string(buf, (eadk_point_t){0, EADK_SCREEN_HEIGHT - 14}, false, 0xffe0, eadk_color_black);
 }
 
 /* --------------------------------------------------------------- pack -- */
@@ -215,7 +245,8 @@ int main(int argc, char* argv[]) {
   text(5, "OK : A     Retour : B");
   text(6, "shift : Select  alpha : Start");
   text(7, "e^x : L    10^x : R");
-  text(8, "0 : chiffres   Maison : quitter");
+  text(8, "1 : taille   0 : chiffres");
+  text(9, "Maison : quitter");
   text(10, "Appuyez sur OK");
   waitKey();
   clear();
@@ -223,19 +254,24 @@ int main(int argc, char* argv[]) {
   uint64_t start = eadk_timing_millis();
   uint32_t frame = 0;     /* frames run since start */
   uint32_t skipped = 0;   /* in a row, not drawn */
-  bool stats = false, statsKey = false;
+  bool stats = false, statsKey = false, wideKey = false;
   uint64_t statsAt = start;
-  uint32_t statsFrames = 0, statsDrawn = 0;
+  uint32_t statsFrames = 0, statsDrawn = 0, msDrawn = 0, msPlain = 0, irq0 = 0, skip0 = 0;
 
   for(;;) {
     const eadk_keyboard_state_t keys = eadk_keyboard_scan();
     gba.keys = readPad(keys);
-    const bool zero = eadk_keyboard_key_down(keys, eadk_key_zero);
+    const bool zero = eadk_keyboard_key_down(keys, eadk_key_zero), one = eadk_keyboard_key_down(keys, eadk_key_one);
     if(zero && !statsKey) {
       stats = !stats;
-      if(!stats) eadk_display_push_rect_uniform((eadk_rect_t){0, 0, SCREEN_X, EADK_SCREEN_HEIGHT}, eadk_color_black);
+      if(!stats) eadk_display_push_rect_uniform((eadk_rect_t){0, EADK_SCREEN_HEIGHT - 14, EADK_SCREEN_WIDTH, 14}, eadk_color_black);
     }
     statsKey = zero;
+    if(one && !wideKey) {
+      wide = !wide;
+      clear();
+    }
+    wideKey = one;
 
     /* how late on real time? Late: the picture is not drawn, a few frames in a row at most */
     uint64_t now = eadk_timing_millis();
@@ -260,15 +296,21 @@ int main(int argc, char* argv[]) {
       return 0;
     }
 
-    now = eadk_timing_millis();
+    const uint64_t after = eadk_timing_millis();
+    if(render) msDrawn += (uint32_t)(after - now);
+    else msPlain += (uint32_t)(after - now);
+    now = after;
     if(stats && now - statsAt >= 1000) {
-      const uint32_t ms = (uint32_t)(now - statsAt);
-      drawStats(statsDrawn * 1000 / ms, (uint32_t)((uint64_t)statsFrames * FRAME_US / 10 / ms));
+      const uint32_t ms = (uint32_t)(now - statsAt), plain = statsFrames - statsDrawn;
+      drawStats(statsDrawn * 1000 / ms, (uint32_t)((uint64_t)statsFrames * FRAME_US / 10 / ms),
+                statsDrawn ? msDrawn / statsDrawn : 0, plain ? msPlain / plain : 0,
+                (gba.irqTaken - irq0) / statsFrames, (gba.irqSkipped - skip0) / statsFrames);
+    }
+    if(!stats || now - statsAt >= 1000) {
       statsAt = now;
-      statsFrames = statsDrawn = 0;
-    } else if(!stats) {
-      statsAt = now;
-      statsFrames = statsDrawn = 0;
+      statsFrames = statsDrawn = msDrawn = msPlain = 0;
+      irq0 = gba.irqTaken;
+      skip0 = gba.irqSkipped;
     }
     /* ahead of real time: wait for the frame's slot */
     const int64_t early = (int64_t)((uint64_t)frame * FRAME_US / 1000) - (int64_t)(now - start);

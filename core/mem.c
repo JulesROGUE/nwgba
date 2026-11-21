@@ -271,6 +271,7 @@ static void dmaCtrl(Gba* g, int n, uint32_t v) {
 
 static uint32_t ioRead(Gba* g, uint32_t a) {   /* a: even offset */
   if(a >= 0x400) return 0;
+  if(a != REG_KEYINPUT && !g->irqDepth) g->ioSeen = 1;   /* (the buttons are watched apart: Gba.idleKeys) */
   switch(a) {
     case 0x100: case 0x104: case 0x108: case 0x10c:
       timers_sync(g);
@@ -349,6 +350,7 @@ static void ioWrite8(Gba* g, uint32_t a, uint32_t v) {
 
 static uint32_t saveRead(Gba* g, uint32_t a) {
   a &= 0xffff;
+  g->ioSeen = 1;
   if(g->saveType == GBA_SAVE_NONE) return 0xff;
   if(g->flashState == 0x90 && a < 2) return a ? 0x1b : 0x32;   /* a Panasonic 64 KB flash */
   return save_get(&g->save, a);
@@ -467,7 +469,7 @@ static inline bool pageOf(Gba* g, uint32_t a, const uint8_t*** slot, uint8_t** s
 
 /* --------------------------------------------------------------- reads -- */
 
-uint32_t mem_r8(Gba* g, uint32_t a) {
+static uint32_t r8(Gba* g, uint32_t a) {
   switch(a >> 24) {
     case 0: g->cycles++; return a < sizeof bios_stub ? bios_stub[a] : 0;
     case 2: g->cycles += 3; return g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)][a & PG_MASK];
@@ -488,7 +490,7 @@ uint32_t mem_r8(Gba* g, uint32_t a) {
   }
 }
 
-uint32_t mem_r16(Gba* g, uint32_t a) {
+static uint32_t r16(Gba* g, uint32_t a) {
   switch(a >> 24) {
     case 0: g->cycles++; return a < sizeof bios_stub ? ld16(bios_stub + a) : 0;
     case 2: g->cycles += 3; return ld16(g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK));
@@ -511,7 +513,7 @@ uint32_t mem_r16(Gba* g, uint32_t a) {
   }
 }
 
-uint32_t mem_r32(Gba* g, uint32_t a) {
+static uint32_t r32(Gba* g, uint32_t a) {
   switch(a >> 24) {
     case 0: g->cycles++; return a < sizeof bios_stub ? ld32(bios_stub + a) : 0;
     case 2: g->cycles += 6; return ld32(g->ewR[(a >> PG_SHIFT) & (EWRAM_PAGES - 1)] + (a & PG_MASK));
@@ -533,6 +535,23 @@ uint32_t mem_r32(Gba* g, uint32_t a) {
     case 14: case 15: g->cycles += 5; return saveRead(g, a) * 0x01010101u;
     default: g->cycles++; return 0;
   }
+}
+
+/* the same for everyone else; a handler being watched has its reads noted (irqm.c) */
+uint32_t mem_r8(Gba* g, uint32_t a) {
+  const uint32_t v = r8(g, a);
+  if(g->tracing) irqm_read(g, a, 1, v);
+  return v;
+}
+uint32_t mem_r16(Gba* g, uint32_t a) {
+  const uint32_t v = r16(g, a);
+  if(g->tracing) irqm_read(g, a, 2, v);
+  return v;
+}
+uint32_t mem_r32(Gba* g, uint32_t a) {
+  const uint32_t v = r32(g, a);
+  if(g->tracing) irqm_read(g, a, 4, v);
+  return v;
 }
 
 /* -------------------------------------------------------------- writes -- */
@@ -564,6 +583,7 @@ static inline void put32(Gba* g, uint32_t a, uint8_t* p, uint32_t v) {
 #define ld8(p) (*(const uint8_t*)(p))
 
 void mem_w8(Gba* g, uint32_t a, uint32_t v) {
+  if(g->tracing) irqm_write(g, a, 1, v);
   switch(a >> 24) {
     case 2: {
       const uint32_t i = (a >> PG_SHIFT) & (EWRAM_PAGES - 1);
@@ -595,6 +615,7 @@ void mem_w8(Gba* g, uint32_t a, uint32_t v) {
 }
 
 void mem_w16(Gba* g, uint32_t a, uint32_t v) {
+  if(g->tracing) irqm_write(g, a, 2, v);
   switch(a >> 24) {
     case 2: {
       const uint32_t i = (a >> PG_SHIFT) & (EWRAM_PAGES - 1);
@@ -626,6 +647,7 @@ void mem_w16(Gba* g, uint32_t a, uint32_t v) {
 }
 
 void mem_w32(Gba* g, uint32_t a, uint32_t v) {
+  if(g->tracing) irqm_write(g, a, 4, v);
   switch(a >> 24) {
     case 2: {
       const uint32_t i = (a >> PG_SHIFT) & (EWRAM_PAGES - 1);
@@ -663,6 +685,7 @@ void mem_w32(Gba* g, uint32_t a, uint32_t v) {
 
 void mem_poke8(Gba* g, uint32_t a, uint32_t v) {
   g->busy = 1;
+  if(g->tracing) irqm_abort(g);
   switch(a >> 24) {
     case 2:
     case 6: {
@@ -772,6 +795,7 @@ static inline bool storable(uint32_t a) {
 void mem_copy(Gba* g, uint32_t src, uint32_t dst, uint32_t n, uint32_t unit) {
   const uint32_t keep = g->cycles;   /* the caller counts */
   g->busy = 1;
+  if(g->tracing) irqm_abort(g);
   while(n) {
     uint32_t piece = pieceAt(dst, n);
     if(storable(dst)) {
@@ -810,6 +834,7 @@ void mem_fill(Gba* g, uint32_t dst, uint32_t value, uint32_t count, uint32_t uni
   uint8_t pattern[PG_SIZE + 4];
   uint32_t n = count * unit;
   g->busy = 1;
+  if(g->tracing) irqm_abort(g);
   if(unit == 2) value = (value & 0xffff) * 0x10001u;
   for(uint32_t i = 0; i < sizeof pattern; i += 4) st32(pattern + i, value);
   while(n) {
@@ -835,6 +860,7 @@ void mem_fill(Gba* g, uint32_t dst, uint32_t value, uint32_t count, uint32_t uni
 void mem_load(Gba* g, uint32_t dst, const uint8_t* data, uint32_t n) {
   const uint32_t keep = g->cycles;
   g->busy = 1;
+  if(g->tracing) irqm_abort(g);
   while(n) {
     uint32_t piece = pieceAt(dst, n);
     const uint8_t** slot;

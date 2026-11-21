@@ -72,7 +72,11 @@ static void restoreCpsr(Gba* g) {
   if(!modeIndex(g->cpu.cpsr)) return;
   const bool fromIrq = (g->cpu.cpsr & 0x1f) == 0x12;
   cpu_setCpsr(g, g->cpu.spsr);
-  if(fromIrq && g->irqDepth && --g->irqDepth == 0) g->busy = g->irqBusy;
+  if(fromIrq && g->irqDepth && --g->irqDepth == 0) {
+    g->busy = g->irqBusy;
+    g->idleHeld = g->irqHeld;
+    if(g->tracing) irqm_end(g);
+  }
 }
 
 void cpu_reset(Gba* g) {
@@ -91,7 +95,11 @@ void cpu_reset(Gba* g) {
 void cpu_irq(Gba* g) {
   Cpu* c = &g->cpu;
   if(g->irqDepth >= 8) g->irqDepth = 0;   /* handlers that never return the usual way */
-  if(g->irqDepth++ == 0) g->irqBusy = g->busy;
+  if(g->irqDepth++ == 0) {
+    g->irqBusy = g->busy;
+    g->irqHeld = g->idleHeld;
+    g->idleHeld = 0;
+  }
   const uint32_t old = cpu_getCpsr(c);
   const uint32_t lr = (old & T_BIT) ? c->r[15] : c->r[15] - 4;   /* next instruction + 4 */
   switchMode(c, 0x12);
@@ -276,6 +284,14 @@ static void idleMiss(Gba* g, uint32_t at) {
   g->idleFails = 0;
   g->dirty = 0;
   g->busy = 0;
+  g->ioSeen = 0;
+}
+
+/* the loop is waiting: if it read no register, it stays so (see Gba.idleHeld) */
+static inline void idleHold(Gba* g) {
+  if(g->ioSeen) return;
+  g->idleHeld = 1;
+  g->idleKeys = g->keys;
 }
 static inline bool idleHook(Gba* g, uint32_t at) {
   if(at == g->idleAddr && !g->dirty && !g->busy) return idleSlow(g);
@@ -285,9 +301,12 @@ static inline bool idleHook(Gba* g, uint32_t at) {
 
 /* the same, for the code that keeps the clock in g->cycles */
 static void idleCheck(Gba* g) {
-  if(idleHook(g, g->cpu.r[15]) && (int32_t)(g->target - g->cycles) > 0) {
-    g->idleCycles += g->target - g->cycles;
-    g->cycles = g->target;
+  if(idleHook(g, g->cpu.r[15])) {
+    idleHold(g);
+    if((int32_t)(g->target - g->cycles) > 0) {
+      g->idleCycles += g->target - g->cycles;
+      g->cycles = g->target;
+    }
   }
 }
 
@@ -910,12 +929,15 @@ static const uint8_t kPop8[256] = {B6(0), B6(1), B6(1), B6(2)};   /* bits set in
 #define STACK_OK(a, n) (((a) & 0xff000003u) == 0x03000000u && ((a) & IWRAM_MASK) + 4 * (n) <= IWRAM_SIZE)
 
 /* a waiting loop found: the rest of the slice goes */
-#define IDLE_AT(at)                    \
-  do {                                 \
-    if(idleHook(g, at) && left > 0) {  \
-      g->idleCycles += (uint32_t)left; \
-      left = 0;                        \
-    }                                  \
+#define IDLE_AT(at)                      \
+  do {                                   \
+    if(idleHook(g, at)) {                \
+      idleHold(g);                       \
+      if(left > 0) {                     \
+        g->idleCycles += (uint32_t)left; \
+        left = 0;                        \
+      }                                  \
+    }                                    \
   } while(0)
 
 /* one data-processing instruction of ARM; k is the operation and the S bit,
@@ -957,13 +979,48 @@ static inline __attribute__((always_inline)) void armAlu(Cpu* c, uint32_t k, uin
   c->fc = sc;
 }
 
+/* while an interrupt handler is watched (irqm.c): one instruction at a time, the plain way */
+static void runWatched(Gba* g) {
+  Cpu* const c = &g->cpu;
+  while(g->tracing && (int32_t)(g->target - g->cycles) > 0) {
+    if(c->cpsr & T_BIT) {
+      const uint32_t pc = c->r[15] - 4;
+      if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
+      const uint32_t op = ld16(g->codePtr + (pc - g->codeBase));
+      g->cycles += g->codeCostT;
+      thumbExec(g, op);
+      c->r[15] += 2;
+    } else {
+      const uint32_t pc = c->r[15] - 8;
+      if(pc - g->codeBase >= g->codeLen) mem_codePage(g, pc);
+      const uint32_t op = ld32(g->codePtr + (pc - g->codeBase));
+      g->cycles += g->codeCostA;
+      if(op >> 28 == 14 || cond(c, op >> 28)) armExec(g, op);
+      c->r[15] += 4;
+    }
+#ifdef GBA_STATS
+    g->instrs++;
+#endif
+    if(g->tracing && g->cycles - g->watch.cycles0 > 6000) irqm_abort(g);   /* not a handler that just returns */
+  }
+}
+
 void cpu_run(Gba* g) {
   Cpu* const c = &g->cpu;
   uint32_t* const r = c->r;
   const uint8_t* page;
   uint32_t base, len, cost, off;
+  if(g->tracing) runWatched(g);
   int32_t left = (int32_t)(g->target - g->cycles);
   if(left <= 0) return;
+  if(g->idleHeld) {   /* still in the waiting loop it was left in */
+    if(!g->dirty && !g->busy && g->keys == g->idleKeys) {
+      g->idleCycles += (uint32_t)left;
+      g->cycles = g->target;
+      return;
+    }
+    g->idleHeld = 0;
+  }
   if(!(c->cpsr & T_BIT)) goto arm_enter;
 
   /* -------------------------------------------------------------- Thumb */

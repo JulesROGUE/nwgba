@@ -48,7 +48,13 @@ void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint3
 static void checkIrq(Gba* g) {
   if(g->io[REG_IE >> 1] & g->io[REG_IF >> 1] & 0x3fff) {
     g->halted = false;
-    if((g->io[REG_IME >> 1] & 1) && !(g->cpu.cpsr & 0x80)) cpu_irq(g);
+    if((g->io[REG_IME >> 1] & 1) && !(g->cpu.cpsr & 0x80)) {
+      if(g->tracing) irqm_abort(g);        /* an interrupt inside the handler watched */
+      if(irqm_skip(g)) return;             /* a handler known to do nothing here */
+      irqm_begin(g);
+      g->irqTaken++;
+      cpu_irq(g);
+    }
   }
 }
 

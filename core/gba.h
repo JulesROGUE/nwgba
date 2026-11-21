@@ -75,6 +75,35 @@ typedef struct Timer {
   uint32_t counter, frac;
 } Timer;
 
+/* interrupt handlers seen to do nothing (irqm.c) */
+#define IRQM_SLOTS 4
+#define IRQM_READS 16
+typedef struct IrqMemo {
+  uint16_t source;              /* the interrupts taken together (IE & IF); 0: unused */
+  uint16_t ack;                 /* what the handler clears in IF */
+  uint16_t cost;                /* cycles it takes */
+  uint8_t nReads;
+  bool known;                   /* the readings below are those of a handler that did nothing */
+  uint8_t wait;                 /* frames to wait before learning again, once the readings fail */
+  uint16_t hits;                /* times the readings held since they were learnt */
+  uint32_t quietUntil;          /* the frame until which it is left alone */
+  uint32_t lines[8], bad[8];    /* the lines (VCOUNT) where it does nothing, and where it does something */
+  uint32_t addr[IRQM_READS], value[IRQM_READS];   /* what it reads that could change, and what it found */
+  uint8_t size[IRQM_READS];
+} IrqMemo;
+/* the handler being watched */
+typedef struct IrqWatch {
+  IrqMemo* memo;
+  uint8_t line, nReads;
+  bool impure, wroteIrq, wroteIme;
+  uint16_t ie0, ime0, ack;
+  uint32_t cycles0, cpsr0;
+  uint32_t regs[16];
+  uint32_t sp[2];
+  uint32_t addr[IRQM_READS], value[IRQM_READS];
+  uint8_t size[IRQM_READS];
+} IrqWatch;
+
 typedef struct Dma {
   uint32_t src, dst, count;
 } Dma;
@@ -108,6 +137,12 @@ struct Gba {
   uint8_t irqDepth, irqBusy;      /* interrupt handlers run aside: only what they change in memory counts
                                      against the loop they interrupt (busy is put back when they return) */
   uint8_t idleArmed, idleFails;
+  /* a waiting loop that looked at no register stays one until memory or the
+   * buttons change: the CPU is not even started (cpu_run) */
+  uint8_t idleHeld, irqHeld;      /* irqHeld: idleHeld put aside while an interrupt handler runs */
+  uint8_t ioSeen;                 /* the loop read a register since the jump was first seen */
+  uint16_t idleKeys;              /* the buttons when the loop was last found waiting */
+  bool tracing;                   /* an interrupt handler is being watched (irqm.c): every access the slow way */
   bool halted;
   bool intrWaiting;               /* inside IntrWait (bios.c) */
   uint16_t intrMask;
@@ -157,6 +192,9 @@ struct Gba {
   } objs[128];                    /* the sprites that can show, last first (ppu.c) */
   bool render;                    /* draw this frame */
   uint32_t frame;
+  IrqMemo memo[IRQM_SLOTS];
+  IrqWatch watch;
+  uint32_t irqTaken, irqSkipped;  /* interrupts whose handler ran, and those it was known to do nothing (statistics) */
   uint32_t idleSnap[21];          /* waiting loops: registers and flags the time before */
   uint32_t idleReject[16];        /* jumps that turned out to be working loops */
   GbaHost host;
@@ -211,6 +249,14 @@ void mem_waitcnt(Gba* g);
 void timers_sync(Gba* g);
 void timers_plan(Gba* g);                /* sets timerDue; after a sync or a change of the timers */
 void dma_trigger(Gba* g, int timing);    /* 1 vertical blank, 2 horizontal blank */
+
+/* irqm.c: see there */
+void irqm_begin(Gba* g);   /* an interrupt is about to be taken: watch its handler, if worth it */
+void irqm_end(Gba* g);     /* the handler watched has returned */
+void irqm_abort(Gba* g);   /* it did something that cannot be followed */
+bool irqm_skip(Gba* g);    /* the interrupt about to be taken is known to do nothing: done, without running it */
+void irqm_read(Gba* g, uint32_t a, uint32_t size, uint32_t v);
+void irqm_write(Gba* g, uint32_t a, uint32_t size, uint32_t v);
 
 /* ppu.c */
 void ppu_line(Gba* g, int y, uint16_t* out);

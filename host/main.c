@@ -127,6 +127,7 @@ int main(int argc, char** argv) {
           (unsigned long long)(idle * 100 / (280896ull * (uint64_t)(frames ? frames : 1))));
   fprintf(stderr, "real RAM for pages: %u KB used at most, of %u KB",
           (unsigned)((g.nFrames - 1 - g.lowFree) * PG_SIZE / 1024), (unsigned)((g.nFrames - 1) * PG_SIZE / 1024));
+  fprintf(stderr, "; interrupts: %u handled, %u known to do nothing", (unsigned)g.irqTaken, (unsigned)g.irqSkipped);
   if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);
   if(save_used(&g.save)) fprintf(stderr, "; save memory: %u pages of 256 bytes written", (unsigned)save_used(&g.save));
   fprintf(stderr, "\n");
