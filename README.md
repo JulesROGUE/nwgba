@@ -72,6 +72,7 @@ Ce qui a compté :
 - **la boucle de l'interprète** garde sa place et son horloge dans des registres, fait les instructions courantes sur place, et ne regarde l'heure qu'aux sauts ;
 - **le code qui tourne souvent est regroupé** : ce qui sert à chaque image fait 6 Ko, mais mêlé à ce qui ne sert presque jamais (les sorties lentes de chaque instruction), il s'étalait sur le double, pour 8 Ko de cache. `tools/pgo.sh` fait jouer des jeux au processeur simulé en comptant les branches prises, et le compilateur écarte le reste (`pgo/all.gcda`, à refaire quand `core/` change). Les lectures et écritures en mémoire des instructions Thumb n'existent plus qu'en un exemplaire chacune ;
 - **le dessin** ne va chercher qu'une fois par ligne la rangée de la carte, ne relit pas une tuile identique à la précédente, écrit d'un bloc les tuiles sans pixel transparent, et ne cherche les sprites visibles que quand leur table change.
+- **le mélange de deux couches et les fenêtres** (la transparence des effets, les volets, la sélection éclairée d'un menu) se dessinent par un chemin plus lent, pris seulement par les lignes qui en ont besoin : une fenêtre ouverte sur tout l'écran, comme Pokémon en laisse une en permanence, dit seulement quelles couches se voient, et la ligne garde le chemin rapide ;
 
 Ce qui reste à gagner : un interprète écrit en assembleur (aujourd'hui une trentaine d'instructions de la calculatrice par instruction du jeu), et un code mieux rangé pour le cache.
 

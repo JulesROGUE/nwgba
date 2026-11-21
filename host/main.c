@@ -219,6 +219,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "; pages packed %u times and unpacked %u times (%u packed at the end, in %u frames), woken %u times",
             (unsigned)g.packs, (unsigned)g.unpacks, (unsigned)g.nPacked, (unsigned)g.nSlabs, (unsigned)g.wakes);
   if(g.inflates) fprintf(stderr, "; %u groups of ROM inflated for %u pages brought in", (unsigned)g.inflates, (unsigned)g.romFaults);
+  if(g.mixedLines) fprintf(stderr, "; %u%% of the lines drawn with layers mixed or windows", (unsigned)(g.mixedLines * 100ull / ((uint64_t)(frames ? frames : 1) * GBA_H)));
   if(g.outOfMemory) fprintf(stderr, "; OUT OF MEMORY");
   fprintf(stderr, "; interrupts: %u handled, %u known to do nothing", (unsigned)g.irqTaken, (unsigned)g.irqSkipped);
   if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);

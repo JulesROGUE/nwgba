@@ -192,6 +192,7 @@ struct Gba {
   uint16_t romcFrame[ROM_CACHE];  /* its frame; ROMC_LATELY: looked up since the hand last passed */
   uint32_t zipGroup;              /* the group zipBuf holds (~0: none) */
   uint32_t inflates, romFaults;   /* since the start */
+  uint32_t mixedLines;            /* lines of picture drawn the slower way (layers mixed, windows), since the start */
   uint8_t zipBuf[PACK_GROUP];     /* the group inflated last: the game often goes on to the next page */
   uint32_t leftOutReads;          /* reads of ROM pages the pack left out */
   Pack pack;
