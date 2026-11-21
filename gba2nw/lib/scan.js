@@ -98,26 +98,58 @@ function blocks(rom, ptrs) {
     while (k < sorted.length && sorted[k] < p + r.length) k++;
     const gap = k < sorted.length ? sorted[k] - (p + r.length) : rom.length - (p + r.length);
     if (gap < 0 || gap > 3) return;
-    found.push({ offset: p, kind, data: r.data, length: r.length });
+    found.push({ offset: p, kind, data: r.data, length: r.length });   /* (the test above also says nothing is pointed at inside) */
     busyUntil = p + r.length;
   });
   return found;
 }
 
-/* the sound samples of the usual sound driver: [{offset, size}] (size: the body, after 16 bytes of header) */
+/* how many things are pointed at strictly inside (from, to), and how far
+ * after to the next one is (sorted: every address-looking word, in order) */
+function pointedAt(sorted, from, to) {
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] <= from) lo = mid + 1;
+    else hi = mid;
+  }
+  let inside = 0;
+  while (lo < sorted.length && sorted[lo] < to) { inside++; lo++; }
+  return { inside, gap: lo < sorted.length ? sorted[lo] - to : Infinity };
+}
+
+/* The sound samples of the usual sound driver: [{offset, size}] (size: the
+ * body, after 16 bytes of header). A sample is 16 bytes of header (flags,
+ * pitch, where it loops, its length) and its body. To be taken for one:
+ *  - the pointer to it sits in an instrument, as the driver keeps them: a
+ *    kind byte it knows, a key, a zero, a pan, then the pointer;
+ *  - it ends right where the next thing pointed at begins;
+ *  - hardly anything looks pointed at inside it: no more than chance puts
+ *    in any data of that size (code and tables are full of such things);
+ *  - there are others like it. */
 function samples(rom, ptrs) {
+  const sorted = [...ptrs].sort((a, b) => a - b);
+  const instrument = new Set();
+  for (let o = 4; o + 4 <= rom.length; o += 4) {
+    const v = rom.readUInt32LE(o);
+    if (v < ROM_BASE || v >= ROM_BASE + rom.length) continue;
+    const kind = rom[o - 4];
+    if ((kind === 0x00 || kind === 0x08 || kind === 0x10 || kind === 0x18) && rom[o - 3] < 0x80 && rom[o - 2] === 0) instrument.add(v - ROM_BASE);
+  }
   const found = [];
   let busyUntil = 0;
-  for (const p of [...ptrs].sort((a, b) => a - b)) {
-    if (p < busyUntil || (p & 3) || p + 16 > rom.length) continue;
+  for (const p of sorted) {
+    if (p < busyUntil || (p & 3) || p + 16 > rom.length || !instrument.has(p)) continue;
     const type = rom.readUInt32LE(p), freq = rom.readUInt32LE(p + 4), loop = rom.readUInt32LE(p + 8), size = rom.readUInt32LE(p + 12);
     if (type !== 0 && type !== 0x40000000) continue;
     if (freq < 500 * 1024 || freq > 60000 * 1024) continue;
     if (size < 256 || size > 400000 || loop > size || p + 16 + size > rom.length) continue;
+    const around = pointedAt(sorted, p, p + 16 + size);
+    if (around.gap > 7 || around.inside > 2 + size / 512) continue;
     found.push({ offset: p, size });
     busyUntil = p + 16 + size;
   }
-  /* one or two look-alikes prove nothing: a game with samples has dozens, side by side */
+  /* one or two look-alikes prove nothing: a game with samples has dozens */
   if (found.length < 8) return [];
   return found;
 }

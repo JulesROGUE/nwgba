@@ -77,7 +77,9 @@ function makeRom() {
   const code = Buffer.alloc(0x4000);
   for (let i = 0; i < code.length; i++) code[i] = rnd(256) | 1;
   add(code);
-  const tableAt = add(Buffer.alloc(4 * (pictures.length + samples.length + 1)));
+  /* pointers to the pictures and to the last thing; the samples are pointed at from instruments, 12 bytes each */
+  const tableAt = add(Buffer.alloc(4 * (pictures.length + 1)));
+  const voicesAt = add(Buffer.alloc(12 * samples.length));
   const where = [];
   for (const p of pictures) where.push(add(lz77(p)));
   for (const s of samples) {
@@ -90,7 +92,14 @@ function makeRom() {
   }
   where.push(add(Buffer.from('FLASH_V121\0\0')));
   const rom = Buffer.concat(chunks);
-  where.forEach((w, i) => rom.writeUInt32LE(0x08000000 + w, tableAt + 4 * i));
+  pictures.forEach((_, i) => rom.writeUInt32LE(0x08000000 + where[i], tableAt + 4 * i));
+  rom.writeUInt32LE(0x08000000 + where[where.length - 1], tableAt + 4 * pictures.length);
+  samples.forEach((_, i) => {
+    const e = voicesAt + 12 * i;
+    rom[e + 1] = 0x3c;
+    rom.writeUInt32LE(0x08000000 + where[pictures.length + i], e + 4);
+    rom.writeUInt32LE(0x00ff00ff, e + 8);
+  });
   return { rom, pictures, pictureAt: where.slice(0, pictures.length), sampleAt: where.slice(pictures.length, pictures.length + samples.length), samples };
 }
 const made = makeRom();
