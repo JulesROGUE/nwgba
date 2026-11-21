@@ -1,0 +1,7 @@
+# game data never goes in this repository
+*.gba
+*.GBA
+*.sav
+*.pack
+build/
+*.ppm

@@ -1,0 +1,134 @@
+/*
+ * nwgba bench - counts the ARM instructions the core executes per frame.
+ *
+ * Runs the core, built as for the calculator, on QEMU's Cortex-M7 board
+ * with instruction counting on: one instruction = one nanosecond of virtual
+ * time. This measures instructions, not seconds: caches and the external
+ * flash are not modelled. For scale, nwsnes's Donkey Kong Country costs about
+ * 3.3 million instructions a frame on this bench the way it is played on the
+ * calculator, where it runs at full speed.
+ */
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "../core/gba.h"
+#include "../host/keys.h"
+
+extern const uint8_t bench_rom[];
+extern const uint32_t bench_rom_size;
+
+#ifndef BENCH_FRAMES
+#define BENCH_FRAMES 600
+#endif
+#ifndef BENCH_SKIP
+#define BENCH_SKIP 0
+#endif
+#ifndef BENCH_KEYS
+#define BENCH_KEYS ""
+#endif
+
+static inline uint32_t semi(uint32_t op, void* arg) {
+  register uint32_t r0 __asm__("r0") = op;
+  register void* r1 __asm__("r1") = arg;
+  __asm__ volatile("bkpt 0xab" : "+r"(r0) : "r"(r1) : "memory");
+  return r0;
+}
+static void out(const char* s) { semi(0x04, (void*)s); }
+/* virtual time: SysTick runs at 25 MHz, an instruction is a nanosecond */
+#define SYST_CSR (*(volatile uint32_t*)0xE000E010)
+#define SYST_RVR (*(volatile uint32_t*)0xE000E014)
+#define SYST_CVR (*(volatile uint32_t*)0xE000E018)
+extern volatile uint32_t bench_systick_wraps;
+static void clockStart(void) {
+  SYST_RVR = 0xffffff;
+  SYST_CVR = 0;
+  SYST_CSR = 7;
+  while(SYST_CVR == 0) {}
+}
+static uint64_t ticks(void) {
+  uint32_t w, v;
+  do {
+    w = bench_systick_wraps;
+    v = SYST_CVR;
+  } while(w != bench_systick_wraps);
+  return (((uint64_t)w << 24) + (0xffffffu - v)) * 40;
+}
+static void quit(void) {
+  uint32_t args[2] = {0x20026, 0};
+  semi(0x20, args);
+  for(;;) {}
+}
+static void outNum(uint64_t v) {
+  char buf[24];
+  int n = 23;
+  buf[n] = 0;
+  do {
+    buf[--n] = (char)('0' + v % 10);
+    v /= 10;
+  } while(v);
+  out(buf + n);
+}
+
+static Gba g;
+static uint8_t ram[(EWRAM_PAGES + IWRAM_PAGES + VRAM_PAGES) * PG_SIZE];
+static uint8_t save[0x10000];
+static uint16_t sink[GBA_W];
+static uint32_t checksum;
+
+static void line(void* user, int y, const uint16_t* px) {
+  (void)user;
+  memcpy(sink, px, sizeof sink);   /* stands for handing the line to the display */
+  checksum = checksum * 31 + px[(y * 7) % GBA_W];
+}
+
+/* drawEvery: 1 = every frame, 0 = never, n = one frame out of n */
+static void run(uint32_t drawEvery, const char* label) {
+  const GbaHost host = {0, line, 0};
+  memset(ram, 0, sizeof ram);
+  memset(save, 0xff, sizeof save);
+  gba_init(&g, &host, bench_rom, bench_rom_size, ram, save);
+  g.saveType = GBA_SAVE_FLASH;
+  uint64_t t0 = 0, worst = 0;
+  for(uint32_t f = 0; f < BENCH_SKIP + BENCH_FRAMES; f++) {
+    if(f == BENCH_SKIP) t0 = ticks();
+    g.keys = scriptKeys(BENCH_KEYS, f);
+    g.render = f >= BENCH_SKIP && drawEvery && f % drawEvery == 0;
+    const uint64_t a = ticks();
+    gba_runFrame(&g);
+    const uint64_t d = ticks() - a;
+    if(f >= BENCH_SKIP && d > worst) worst = d;
+  }
+  const uint64_t t = ticks() - t0;
+  out("rom ");
+  outNum(bench_rom_size);
+  out(" bytes, first word ");
+  outNum(ld32(bench_rom));
+  out(", pc ");
+  outNum(g.cpu.r[15]);
+  out(", guest instructions in all ");
+  outNum(g.instrs);
+  out("\n");
+  out(label);
+  out(": ");
+  outNum(t / BENCH_FRAMES);
+  out(" instructions per frame on average, ");
+  outNum(worst);
+  out(" at most\n");
+}
+
+int main(void) {
+  clockStart();
+#ifdef BENCH_ONE
+  run(1, "drawing every frame");
+#else
+  run(1, "drawing every frame");
+  run(0, "drawing nothing");
+  run(3, "drawing one frame in 3");
+#endif
+  out("checksum ");
+  outNum(checksum);
+  out("\n");
+  quit();
+  return 0;
+}
