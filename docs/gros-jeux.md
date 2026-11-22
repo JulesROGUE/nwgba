@@ -50,3 +50,21 @@ demi-seconde, et le reste du temps rien.
   48 à 96 Ko de pages et l'état du décompresseur, il faut plus que les 94 Ko d'une appli ordinaire ;
 - le jeu au-delà de l'introduction (combats) ;
 - tout ce qui touche au système maison : rien n'est essayé.
+
+## Le système : ce que le noyau permet (lecture du code public et du noyau désassemblé)
+
+- Le noyau (35 Ko utiles) ne contient aucune vérification de signature : ni SHA, ni ed25519. Ce qui
+  vérifie le système au démarrage est donc le programme de démarrage, dans la flash interne, que
+  nous ne lisons pas. Remplacer le système de la moitié qui démarre reviendrait à contourner cette
+  vérification : on ne le fait pas.
+- La voie prévue par NumWorks pour un système non officiel : en quittant la session USB à une
+  adresse hors de la zone des applis (`Calculator::leave`), le système officiel demande au noyau le
+  niveau « ThirdParty » (SVC 7 : l'adresse doit être dans l'autre moitié, l'en-tête valide, la
+  version compatible), puis saute dans ce système. Rien n'est écrit dans la moitié qui démarre ; un
+  RESET ramène le système officiel.
+- Au niveau ThirdParty, le noyau n'autorise l'écriture que dans la zone des applis que déclare
+  l'en-tête du système en cours, et ses octets persistants.
+
+Conséquence : la place reste celle d'aujourd'hui, environ 6,4 à 6,5 Mo (le système officiel garde
+ses 1 472 Ko), et non 8,0. Ce qu'un système maison lancé ainsi apporterait, c'est la mémoire vive :
+presque toute, au lieu des 94 Ko d'une appli.
