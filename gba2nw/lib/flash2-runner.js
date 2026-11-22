@@ -48,7 +48,7 @@ function keep(file, store) {
 
 function main() {
   const [mode, file, nwa, extra] = process.argv.slice(2);
-  if (!['install', 'save', 'restore'].includes(mode) || !file || !nwa) stop('usage : flash2-runner.js install|save|restore <fichier> <nwgba.nwa>');
+  if (!['install', 'save', 'restore', 'diag'].includes(mode) || !file || !nwa) stop('usage : flash2-runner.js install|save|restore <fichier> <nwgba.nwa>');
   let parts = null, toRestore = null;
   try {
     if (mode === 'install') parts = flash2.splitPack(fs.readFileSync(file));
@@ -78,7 +78,64 @@ function main() {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* harmless */ }
   });
 
-  if (mode === 'save') {
+  if (mode === 'diag') {
+    /* A map of the whole flash, read only: what each half holds, what the
+     * calculator says may be written. Nothing is written, nothing installed. */
+    globalThis.__gba2nwBefore = async (calc, firmware, area) => {
+      const lines = [];
+      const say = (t) => { lines.push(t); out(t); };
+      const hex = (n) => '0x' + (n >>> 0).toString(16).padStart(8, '0');
+      const read = async (a, n) => {
+        try {
+          const d = await calc.uploadFlash(a, n);
+          return Buffer.from(d.buffer, d.byteOffset, d.length);
+        } catch (e) {
+          return null;
+        }
+      };
+      const text = (b) => (b ? b.toString('latin1').replace(/[^\x20-\x7e]/g, '.') : '(lecture refusée)');
+      try {
+        say('\n=== diagnostic nwgba : la mémoire flash, lue par USB (rien n\'est écrit) ===');
+        say('système : ' + JSON.stringify(firmware));
+        say('modèle : ' + JSON.stringify(calc.infos.model));
+        say('zones déclarées par la calculatrice : ' + JSON.stringify(calc.infos.memoryLayout));
+        const FLASH = flash2.FLASH, HALF = flash2.HALF, SECTOR = flash2.SECTOR;
+        const running = FLASH + Math.floor((area.flashStart - FLASH) / HALF) * HALF;
+        say(`zone des applis : ${hex(area.flashStart)} à ${hex(area.flashStart + area.flashLength)} ; système en service : moitié ${running === FLASH ? 'A' : 'B'}`);
+        for (const half of [FLASH, FLASH + HALF]) {
+          say(`\n--- moitié ${half === FLASH ? 'A' : 'B'} (${hex(half)})${half === running ? ', en service' : ', copie de secours'} ---`);
+          for (const off of [0, 0x1000, 0x10000]) {
+            const b = await read(half + off, 64);
+            say(`  +${off.toString(16).padStart(5, '0')} : ${b ? b.toString('hex') : '(lecture refusée)'}`);
+            say(`           ${text(b)}`);
+          }
+          // each sector of 64 KB: its start, its middle and its end. '.' blank, '#' holds something, '?' cannot be read
+          let map = '', used = 0, last = -1;
+          for (let k = 0; k < HALF / SECTOR; k++) {
+            let blank = true, ok = true;
+            for (const off of [0, SECTOR / 2, SECTOR - 64]) {
+              const b = await read(half + k * SECTOR + off, 64);
+              if (!b) { ok = false; break; }
+              if (!b.every((x) => x === 0xff)) blank = false;
+            }
+            map += !ok ? '?' : blank ? '.' : '#';
+            if (ok && !blank) { used++; last = k; }
+          }
+          say('  secteurs de 64 Ko (# occupé, . vide, ? illisible) :');
+          say('  ' + map.replace(/(.{16})/g, '$1 '));
+          say(`  ${used} secteurs occupés sur 64 ; le dernier occupé : n° ${last}`);
+        }
+        say('\n=== fin du diagnostic ===');
+        await leave(calc, area);
+      } catch (e) {
+        await leave(calc, area);
+        stop(told(e));
+      }
+      fs.writeFileSync(file, lines.join('\n') + '\n');
+      out(`\nRapport écrit dans ${file}`);
+      process.exit(0);
+    };
+  } else if (mode === 'save') {
     globalThis.__gba2nwBefore = async (calc, firmware, area) => {
       let got;
       try {

@@ -37,6 +37,8 @@ function usage() {
   gba2nw restaurer FICHIER.nwsave       remet une sauvegarde dans la calculatrice
   gba2nw restaurer FICHIER.sav JEU.pack     la même chose, depuis la sauvegarde d'un autre émulateur
   (« installer » copie d'abord la sauvegarde à côté du pack, et la remet si l'installation l'a effacée.)
+
+  gba2nw diagnostic [FICHIER.txt]       lit la mémoire flash de la calculatrice et en fait un rapport (n'écrit rien)
 `);
 }
 
@@ -125,6 +127,11 @@ function main(argv) {
   if ((cmd === 'installer' || cmd === 'install') && argv[1]) return install(argv[1]);
   if ((cmd === 'preparer' || cmd === 'préparer' || cmd === 'pack') && argv[1]) return prepare(argv.slice(1));
   if (cmd === 'sauver' || cmd === 'save') return saveOrRestore('save', argv.slice(1));
+  if (cmd === 'diagnostic') {   /* a map of the calculator's flash, read only, into a text file */
+    const nwa = path.join(__dirname, '..', 'runtime', 'nwgba.nwa');
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), 'diag', argv[1] || 'diagnostic.txt', nwa], { stdio: 'inherit' });
+    return r.status === null ? 1 : r.status;
+  }
   if (cmd === 'restaurer' || cmd === 'restore') return saveOrRestore('restore', argv.slice(1));
   usage();
   return cmd ? 1 : 0;

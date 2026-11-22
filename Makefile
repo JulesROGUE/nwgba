@@ -33,7 +33,7 @@ ARM_LDFLAGS += -Wl,-e,main -Wl,-u,eadk_app_name -Wl,-u,eadk_app_icon -Wl,-u,eadk
 ARM_LDFLAGS += -Wl,--gc-sections
 APP_SRC = $(CORE) core/flash.c numworks/main.c
 
-.PHONY: nwa nwa-check ramtest
+.PHONY: nwa nwa-check ramtest flashtest
 nwa: $(BUILD)/nwgba.nwa
 
 $(BUILD)/icon.o: numworks/icon.png | $(BUILD)
@@ -57,6 +57,11 @@ $(BUILD)/nwgba.nwa: $(BUILD)/nwa/all.o core/flash.c numworks/main.c numworks/app
 ramtest: $(BUILD)/ramtest.nwa
 $(BUILD)/ramtest.nwa: numworks/ramtest.c $(BUILD)/icon.o
 	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) numworks/ramtest.c $(BUILD)/icon.o -o $@
+
+# another: may an app read where the two systems are in the flash (numworks/flashtest.c)
+flashtest: $(BUILD)/flashtest.nwa
+$(BUILD)/flashtest.nwa: numworks/flashtest.c $(BUILD)/icon.o
+	$(ARM_CC) $(ARM_CFLAGS) $(ARM_LDFLAGS) numworks/flashtest.c $(BUILD)/icon.o -o $@
 
 nwa-check: $(BUILD)/nwgba.nwa
 	printf 'none' > $(BUILD)/empty.pack
