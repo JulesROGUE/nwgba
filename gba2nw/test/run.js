@@ -366,11 +366,11 @@ if (flash2.nwlinkDir() && fs.existsSync(path.join(ROOT, 'runtime', 'nwgba.nwa'))
     assert.match(r.stdout, /REFUSÉ/);
     after = JSON.parse(fs.readFileSync(report));
     assert.strictEqual(after.changes.length, 0);
-    // running from B: the spare is A, never B
+    // running from B: the start of half A is declared in smaller pages, which this does not handle: it must stop before writing
     r = gba2nw(['essai-secours', path.join(tmp, 'secours3.bin')], { running: 'B', report });
-    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.strictEqual(r.status, 3);
     after = JSON.parse(fs.readFileSync(report));
-    assert.ok(after.changes.every((c) => c[0] >= FLASH && c[0] + c[1] <= FLASH + 0x10000), 'wrote outside the first sector of half A');
+    assert.strictEqual(after.changes.length, 0);
   });
 } else {
   console.log('skip  saves over USB (npm install, and runtime/nwgba.nwa)');
