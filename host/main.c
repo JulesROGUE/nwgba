@@ -116,6 +116,8 @@ int main(int argc, char** argv) {
   const char* verify = NULL;   /* a file the ROM, as read through the pack, must be equal to */
   const char* saveOut = NULL;  /* the save memory, written to a file at the end (as other emulators keep it) */
   const char* saveIn = NULL;   /* and read from one at the start */
+  const char* storeOut = NULL; /* the same, as the app keeps it in the calculator's RAM (save.h) */
+  const char* storeIn = NULL;
   const char* dump = NULL;
   const char* keys = NULL;
   for(int i = 2; i < argc; i++) {
@@ -129,6 +131,8 @@ int main(int argc, char** argv) {
     else if(!strcmp(argv[i], "--verify") && i + 1 < argc) verify = argv[++i];
     else if(!strcmp(argv[i], "--save-out") && i + 1 < argc) saveOut = argv[++i];
     else if(!strcmp(argv[i], "--save-in") && i + 1 < argc) saveIn = argv[++i];
+    else if(!strcmp(argv[i], "--store-out") && i + 1 < argc) storeOut = argv[++i];
+    else if(!strcmp(argv[i], "--store-in") && i + 1 < argc) storeIn = argv[++i];
   }
   FILE* f = fopen(argv[1], "rb");
   if(!f) {
@@ -169,6 +173,18 @@ int main(int argc, char** argv) {
   }
   uint8_t* mem = calloc(1, memBytes);
   uint8_t* save = calloc(1, SAVE_BYTES(500));
+  if(storeIn) {   /* what a calculator had at the end of its RAM */
+    FILE* sf = fopen(storeIn, "rb");
+    if(!sf) {
+      fprintf(stderr, "cannot read %s\n", storeIn);
+      return 1;
+    }
+    fseek(sf, 0, SEEK_END);
+    const long sn = ftell(sf);
+    fseek(sf, 0, SEEK_SET);
+    if(sn <= 0 || (unsigned long)sn > SAVE_BYTES(500) || fread(save + SAVE_BYTES(500) - sn, 1, (size_t)sn, sf) != (size_t)sn) return 1;
+    fclose(sf);
+  }
   const GbaHost host = {&h, hostLine, hostLog};
   gba_init(&g, &host, &pack, mem, memBytes, save, SAVE_BYTES(500));
   if(saveIn) {
@@ -240,6 +256,15 @@ int main(int argc, char** argv) {
   if(g.leftOutReads) fprintf(stderr, "; %u reads of ROM the pack left out", (unsigned)g.leftOutReads);
   save_sync(&g.save);
   if(save_used(&g.save)) fprintf(stderr, "; save memory: %u pages written, kept in %u bytes%s", (unsigned)save_used(&g.save), (unsigned)SAVE_BYTES(save_slabs(&g.save)), g.save.full ? " (FULL)" : "");
+  if(storeIn) fprintf(stderr, "; the store given was %s", save_used(&g.save) ? "taken" : "REFUSED");
+  if(storeOut) {
+    FILE* sf = fopen(storeOut, "wb");
+    const uint32_t sn = SAVE_BYTES(save_slabs(&g.save));
+    if(sf) {
+      fwrite(save + SAVE_BYTES(500) - sn, 1, sn, sf);
+      fclose(sf);
+    }
+  }
   if(saveOut) {
     FILE* sf = fopen(saveOut, "wb");
     const uint32_t span = g.saveType == GBA_SAVE_FLASH1M ? SAVE_SPAN : 0x10000u;

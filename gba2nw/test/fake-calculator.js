@@ -49,7 +49,10 @@ function description(half, { blank = false } = {}) {
 }
 
 class FakeCalculator {
-  constructor({ running = 'A', layout = 'official', kernel = 'allow', otherBlank = false, preload = null } = {}) {
+  constructor({ running = 'A', layout = 'official', kernel = 'allow', otherBlank = false, preload = null, ramEnd = null, ramWrites = 'allow', wipesRam = false } = {}) {
+    this.ramWrites = ramWrites;
+    this.wipesRam = wipesRam;
+    this.ramEndFile = ramEnd;   // a file whose bytes are at the end of the RAM of external apps (0x2003d400)
     this.runningHalf = running === 'A' ? FLASH : FLASH + HALF;
     this.otherHalf = running === 'A' ? FLASH + HALF : FLASH;
     this.kernel = kernel;
@@ -86,6 +89,10 @@ class FakeCalculator {
     this.ram.writeUInt32LE(this.runningHalf + 0x1000, 4);
     this.ram.writeUInt32LE(this.runningHalf + 0x10000, 8);
     Buffer.from('badbeeef', 'hex').copy(this.ram, 12);
+    if (ramEnd) {
+      const e = fs.readFileSync(ramEnd);
+      e.copy(this.ram, 0x3d400 - e.length);
+    }
 
     // what the calculator declares over USB, by half and by kind of system (usb_userland.h)
     const strings = {
@@ -101,7 +108,7 @@ class FakeCalculator {
     this.newPointer = null;
     this.erasePage = null;
     this.pending = null;
-    this.log = { erased: [], written: [], refused: 0, left: null, reads: 0 };
+    this.log = { erased: [], written: [], ramWritten: [], refused: 0, left: null, reads: 0 };
 
     const self = this;
     const alt = (n) => ({ alternateSetting: n, interfaceClass: 254, interfaceSubclass: 1, interfaceProtocol: 2 });
@@ -153,9 +160,22 @@ class FakeCalculator {
       return;
     }
     if (this.state !== DNBUSY) return;
+    if (this.pending && this.alt === 1) {   // the RAM
+      const { address, data } = this.pending;
+      this.pending = null;
+      if (this.ramWrites === 'refuse' || address < RAM || address + data.length > RAM + RAM_SIZE) {
+        this.log.refused++;
+        this.state = ERROR;
+        this.status = ERR_TARGET;
+        return;
+      }
+      data.copy(this.ram, address - RAM);
+      this.log.ramWritten.push([address, data.length]);
+    }
     if (this.pending) {
       const { address, data } = this.pending;
       this.pending = null;
+      if (this.wipesRam) this.ram.fill(0, 0x18000);   // a calculator whose RAM does not outlive an installation
       const half = FLASH + Math.floor((address - FLASH) / HALF) * HALF;
       if (!this.allowed(address) || !this.allowed(address + data.length - 1)) {
         this.log.refused++;
@@ -304,6 +324,7 @@ if (process.env.GBA2NW_TEST_CALC) {
   process.on('exit', (code) => {
     if (!setup.report) return;
     fs.writeFileSync(setup.report + '.flash', calc.flash);
+    fs.writeFileSync(setup.report + '.ram', calc.ram);
     fs.writeFileSync(setup.report, JSON.stringify({ code, log: calc.log, changes: calc.changes(), state: calc.state }));
   });
 }

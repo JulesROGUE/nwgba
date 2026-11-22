@@ -6,6 +6,8 @@
  *
  *   gba2nw preparer JEU.gba [-o JEU.pack]
  *   gba2nw installer JEU.pack
+ *   gba2nw sauver [FICHIER.nwsave]        the game's save memory, calculator -> PC
+ *   gba2nw restaurer FICHIER.nwsave       and back (or FICHIER.sav JEU.pack)
  */
 const fs = require('fs');
 const path = require('path');
@@ -29,6 +31,12 @@ function usage() {
       --plain              aucune préparation : la ROM telle quelle
 
   gba2nw installer FICHIER.pack         installe l'appli et le jeu (calculatrice branchée en USB)
+
+  gba2nw sauver [FICHIER.nwsave]        copie sur le PC ce que le jeu a sauvegardé dans la calculatrice
+                                        (et un FICHIER.sav pour les autres émulateurs)
+  gba2nw restaurer FICHIER.nwsave       remet une sauvegarde dans la calculatrice
+  gba2nw restaurer FICHIER.sav JEU.pack     la même chose, depuis la sauvegarde d'un autre émulateur
+  (« installer » copie d'abord la sauvegarde à côté du pack, et la remet si l'installation l'a effacée.)
 `);
 }
 
@@ -88,7 +96,27 @@ function install(packFile) {
   }
   console.log(`Installation de ${packFile} : ${kb(parts.main.length)} avec l'appli` +
     (parts.ext ? `, ${kb(parts.ext.length)} dans l'autre moitié de la mémoire flash` : ''));
-  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), packFile, nwa], { stdio: 'inherit' });
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), 'install', packFile, nwa], { stdio: 'inherit' });
+  return r.status === null ? 1 : r.status;
+}
+
+/* the game's save memory, from the calculator to a file and back (lib/saves.js) */
+function saveOrRestore(mode, args) {
+  const nwa = path.join(__dirname, '..', 'runtime', 'nwgba.nwa');
+  if (!fs.existsSync(nwa)) {
+    console.log('Erreur : runtime/nwgba.nwa manque.');
+    return 1;
+  }
+  let file = args[0];
+  if (mode === 'save') {
+    if (!file) file = 'sauvegarde.nwsave';
+    if (!/\.nwsave$/.test(file)) file += '.nwsave';
+  } else if (!file || !fs.existsSync(file)) {
+    console.log('Erreur : fichier de sauvegarde introuvable' + (file ? ' : ' + file : '.'));
+    return 1;
+  }
+  const more = mode === 'restore' && args[1] ? [args[1]] : [];
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), mode, file, nwa, ...more], { stdio: 'inherit' });
   return r.status === null ? 1 : r.status;
 }
 
@@ -96,6 +124,8 @@ function main(argv) {
   const cmd = argv[0];
   if ((cmd === 'installer' || cmd === 'install') && argv[1]) return install(argv[1]);
   if ((cmd === 'preparer' || cmd === 'préparer' || cmd === 'pack') && argv[1]) return prepare(argv.slice(1));
+  if (cmd === 'sauver' || cmd === 'save') return saveOrRestore('save', argv.slice(1));
+  if (cmd === 'restaurer' || cmd === 'restore') return saveOrRestore('restore', argv.slice(1));
   usage();
   return cmd ? 1 : 0;
 }

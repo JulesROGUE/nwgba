@@ -53,7 +53,13 @@ La mémoire de sauvegarde du jeu (SRAM, ou flash de 64 ou 128 Ko) est gardée pa
 
 Ce qui est là survit à la sortie de l'appli : au lancement suivant elle retrouve sa réserve (un nombre magique, le jeu, une somme de contrôle), et lui donne ce qu'elle occupe déjà plus de quoi écrire encore (10 Ko pour un jeu à 128 Ko de sauvegarde). L'appli n'est pas prévenue quand on la quitte : la page en cours d'écriture est rangée dès que le jeu a laissé sa mémoire de sauvegarde tranquille deux images de suite.
 
-Ce que ça ne fait pas : la mémoire vive ne survit ni à une réinitialisation de la calculatrice, ni à une réinstallation. Rien n'est encore écrit ailleurs. `nwgba-host --save-out` et `--save-in` lisent et écrivent le format `.sav` des autres émulateurs.
+La mémoire vive ne survit pas à une réinitialisation de la calculatrice. Mais la calculatrice laisse lire et écrire sa mémoire vive par USB (c'est ainsi que le site de NumWorks sauvegarde les scripts Python), et `gba2nw` s'en sert (`gba2nw/lib/saves.js`) :
+
+- `gba2nw sauver partie.nwsave` copie la sauvegarde sur le PC, avec à côté un `partie.sav` au format des autres émulateurs ;
+- `gba2nw restaurer partie.nwsave` la remet (ou `restaurer partie.sav JEU.pack`, depuis un autre émulateur) ;
+- `gba2nw installer` en fait d'abord une copie à côté du pack, et la remet si l'installation l'a effacée.
+
+Tout cela est essayé sur une calculatrice simulée ; sur une vraie, il reste à voir si le système laisse lire et écrire cette zone de mémoire. `nwgba-host --save-out` et `--save-in` lisent et écrivent les `.sav`, `--store-out` et `--store-in` la réserve telle qu'elle est en mémoire.
 
 ### La vitesse
 

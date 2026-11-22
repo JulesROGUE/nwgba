@@ -257,6 +257,88 @@ if (flash2.nwlinkDir() && fs.existsSync(path.join(ROOT, 'runtime', 'nwgba.nwa'))
   console.log('skip  installation (npm install, and runtime/nwgba.nwa)');
 }
 
+/* ------------------------------------------------------------ saves -- */
+const saves = require('../lib/saves');
+
+/* a save as a game leaves it: mostly untouched, some zeros, some text-like data, a little noise */
+function fakeSave(seed) {
+  const img = Buffer.alloc(0x20000, 0xff);
+  const rnd = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8;
+  for (let k = 0; k < 50; k++) {
+    const a = rnd() % 0x20000, n = rnd() % 900, kind = rnd() % 5;
+    for (let i = 0; i < n && a + i < 0x20000; i++) img[a + i] = kind === 0 ? 0 : kind === 1 ? (i / 7) & 3 : kind === 2 ? rnd() & 255 : kind === 3 ? 0x55 : (i * i) & 255;
+  }
+  return img;
+}
+
+test('a save goes into a store and comes back, and a damaged one is refused', () => {
+  for (let t = 1; t <= 20; t++) {
+    const img = fakeSave(t), store = saves.encode(img, 0xabc0 + t);
+    assert.ok(saves.decode(store).equals(img));
+    assert.ok(saves.fromFile(saves.toFile(store)).equals(store));
+    const ram = Buffer.concat([Buffer.alloc(8192, 0x5a), store]);
+    assert.deepStrictEqual(saves.find(ram).map((s) => [s.top, s.key]), [[ram.length, 0xabc0 + t]]);
+    ram[ram.length - 700] ^= 4;
+    assert.strictEqual(saves.find(ram).length, 0);
+  }
+  assert.throws(() => saves.fromFile(Buffer.from('not a save at all, really')), /nwsave/);
+});
+
+if (flash2.nwlinkDir() && fs.existsSync(path.join(ROOT, 'runtime', 'nwgba.nwa'))) {
+  const gba2nw = (args, calc) => spawnSync(process.execPath, [path.join(ROOT, 'bin', 'gba2nw.js'), ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, GBA2NW_TEST_USB: path.join(__dirname, 'fake-calculator.js'), GBA2NW_TEST_CALC: JSON.stringify(calc) },
+  });
+  const image = fakeSave(99);
+  const store = saves.encode(image, saves.keyOfPack(fs.readFileSync(packFile)));
+  const storeFile = path.join(tmp, 'ram-end.bin');
+  fs.writeFileSync(storeFile, store);
+  const ramEnd = 0x3d400;
+
+  test('sauver copies the save from the calculator, restaurer puts it back', () => {
+    const file = path.join(tmp, 'ma partie.nwsave'), report = path.join(tmp, 'r1.json');
+    let r = gba2nw(['sauver', file], { ramEnd: storeFile, report });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.ok(saves.fromFile(fs.readFileSync(file)).equals(store));
+    assert.ok(fs.readFileSync(path.join(tmp, 'ma partie.sav')).equals(image));
+    let after = JSON.parse(fs.readFileSync(report));
+    assert.deepStrictEqual([after.log.erased.length, after.log.written.length, after.log.ramWritten.length, after.changes.length], [0, 0, 0, 0], 'reading a save must write nothing');
+
+    r = gba2nw(['sauver', path.join(tmp, 'rien')], { report });
+    assert.strictEqual(r.status, 4);
+    assert.match(r.stdout, /Aucune sauvegarde/);
+
+    // back into a calculator that has none: from our file, then from the plain image and the pack
+    for (const args of [['restaurer', file], ['restaurer', path.join(tmp, 'ma partie.sav'), packFile]]) {
+      r = gba2nw(args, { report });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      after = JSON.parse(fs.readFileSync(report));
+      const ram = fs.readFileSync(report + '.ram');
+      assert.ok(saves.decode(ram.subarray(ramEnd - store.length, ramEnd)).equals(image), 'the save is not at the end of the apps\' RAM');
+      assert.deepStrictEqual([after.log.erased.length, after.log.written.length, after.changes.length], [0, 0, 0], 'restoring must not touch the flash');
+    }
+    r = gba2nw(['restaurer', file], { report, ramWrites: 'refuse' });
+    assert.strictEqual(r.status, 3);
+    assert.match(r.stdout, /refusé/);
+  });
+
+  test('installer keeps a copy of the save, and puts it back if the installation wiped the RAM', () => {
+    const copy = packFile.replace(/\.pack$/, '.nwsave');
+    for (const wipesRam of [false, true]) {
+      fs.rmSync(copy, { force: true });
+      const report = path.join(tmp, 'r2.json');
+      const r = gba2nw(['installer', packFile], { ramEnd: storeFile, wipesRam, report });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert.ok(saves.fromFile(fs.readFileSync(copy)).equals(store), 'no copy next to the pack');
+      const ram = fs.readFileSync(report + '.ram');
+      assert.ok(ram.subarray(ramEnd - store.length, ramEnd).equals(store), 'the save is gone from the calculator');
+      assert.match(r.stdout, wipesRam ? /elle est remise/ : /toujours en place/);
+    }
+  });
+} else {
+  console.log('skip  saves over USB (npm install, and runtime/nwgba.nwa)');
+}
+
 if (failed) {
   console.log(failed + ' test(s) failed');
   process.exitCode = 1;

@@ -241,7 +241,8 @@ function makeHook({ ext, out = process.stdout }) {
  * installation ends with one call that writes the linked app to the app
  * area, "t.downloadFlash(o.flashStart,i,...)", t being the calculator, o the
  * app area and n what the running system says of itself. That call is made
- * to wait for globalThis.__gba2nwBefore(t, n, o). Nothing else changes, and
+ * to wait for globalThis.__gba2nwBefore(t, n, o), and is followed by
+ * globalThis.__gba2nwAfter(t, n, o) if there is one. Nothing else changes, and
  * the copy of nwlink on disk is not modified: the change is made in memory,
  * at load time. Returns null when the source is not the one expected.
  */
@@ -262,7 +263,7 @@ function hookInstallStep(source) {
   }
   if (end < 0 || end - start > 400) return null;
   return source.slice(0, start) + 'globalThis.__gba2nwBefore(t,n,o).then((function(){return ' +
-    source.slice(start, end) + '}))' + source.slice(end);
+    source.slice(start, end) + '})).then((function(){return globalThis.__gba2nwAfter?globalThis.__gba2nwAfter(t,n,o):void 0}))' + source.slice(end);
 }
 
 function nwlinkDir() {
