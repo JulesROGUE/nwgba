@@ -203,6 +203,19 @@ static void drawStats(uint32_t fps, uint32_t speed, uint32_t msDrawn, uint32_t m
   p = putNum(p, irqs);
   p = putStr(p, "+");
   p = putNum(p, skipped);
+  /* since the last line: lines of picture drawn the slow way (%), pages packed, pieces of ROM unpacked */
+  static uint32_t mixed0, packs0, inflates0, frames0;
+  const uint32_t frames = gba.frame - frames0;
+  p = putStr(p, " M");
+  p = putNum(p, frames ? (gba.mixedLines - mixed0) * 100 / (frames * GBA_H) : 0);
+  p = putStr(p, " P");
+  p = putNum(p, gba.packs - packs0);
+  p = putStr(p, " Z");
+  p = putNum(p, gba.inflates - inflates0);
+  mixed0 = gba.mixedLines;
+  packs0 = gba.packs;
+  inflates0 = gba.inflates;
+  frames0 = gba.frame;
   p = putStr(p, "      ");
   buf[45] = 0;   /* the width of the screen in small characters */
   eadk_display_draw_string(buf, (eadk_point_t){0, EADK_SCREEN_HEIGHT - 14}, false, 0xffe0, eadk_color_black);
