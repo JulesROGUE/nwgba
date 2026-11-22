@@ -48,7 +48,7 @@ function keep(file, store) {
 
 function main() {
   const [mode, file, nwa, extra] = process.argv.slice(2);
-  if (!['install', 'save', 'restore', 'diag'].includes(mode) || !file || !nwa) stop('usage : flash2-runner.js install|save|restore <fichier> <nwgba.nwa>');
+  if (!['install', 'save', 'restore', 'diag', 'spare-try', 'spare-back'].includes(mode) || !file || !nwa) stop('usage : flash2-runner.js install|save|restore <fichier> <nwgba.nwa>');
   let parts = null, toRestore = null;
   try {
     if (mode === 'install') parts = flash2.splitPack(fs.readFileSync(file));
@@ -78,7 +78,97 @@ function main() {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* harmless */ }
   });
 
-  if (mode === 'diag') {
+  if (mode === 'spare-try' || mode === 'spare-back') {
+    /*
+     * The spare system: the copy of the system in the half that does not
+     * run. Its 1.5 MB could hold more of a game.
+     *  spare-try:  copies it whole to a file (unless the file is there
+     *              already), then erases its first sector of 64 KB and writes
+     *              a marker there: the spare copy is no system any more, and
+     *              we learn whether the calculator lets that area be written.
+     *  spare-back: writes the file back, which makes the spare copy what it was.
+     * Never the half that runs: the addresses come from where the calculator
+     * says its app area is, and are checked again before anything is written.
+     */
+    globalThis.__gba2nwBefore = async (calc, firmware, area) => {
+      const FLASH = flash2.FLASH, HALF = flash2.HALF, SECTOR = flash2.SECTOR;
+      const hex = (n) => '0x' + (n >>> 0).toString(16).padStart(8, '0');
+      const buf = (d) => Buffer.from(d.buffer, d.byteOffset, d.length);
+      const bar = (label) => {
+        let last = -1;
+        return (f) => {
+          const pct = Math.floor(f * 100);
+          if (pct !== last && pct % 10 === 0) process.stdout.write(`  ${label} ${pct} %\n`);
+          last = pct;
+        };
+      };
+      try {
+        const start = area.flashStart >>> 0;
+        const running = FLASH + Math.floor((start - FLASH) / HALF) * HALF;
+        const other = running === FLASH ? FLASH + HALF : FLASH;
+        if (!(start >= FLASH && start < FLASH + 2 * HALF)) throw new flash2.Flash2Error('modèle de calculatrice non prévu.');
+        const info = buf(await calc.uploadFlash(other + flash2.INFO_OFFSET, flash2.INFO_SIZE));
+        const mine = buf(await calc.uploadFlash(running + flash2.INFO_OFFSET, flash2.INFO_SIZE));
+        // where the spare system ends: where its app area starts, which must be where ours starts, in the other half
+        const ownStart = mine.readUInt32LE(20);
+        if (mine.readUInt32LE(0) !== 0xdec0edfe || ownStart !== start) throw new flash2.Flash2Error('description du système en service inattendue : rien n\'est fait.');
+        const length = ownStart - running;
+        if (length % SECTOR !== 0 || length < 16 * SECTOR || length > 32 * SECTOR) throw new flash2.Flash2Error('taille du système inattendue : rien n\'est fait.');
+        const layout = calc.infos.memoryLayout || [];
+        for (let a = other; a < other + length; a += SECTOR) {
+          const seg = layout.find((x) => a >= x.address && a + SECTOR <= x.address + x.nbPage * x.pageSize);
+          if (!seg || seg.pageSize !== SECTOR || ((String(seg.type).charCodeAt(0) - 96) & 7) !== 7) {
+            throw new flash2.Flash2Error('la calculatrice ne déclare pas le système de secours comme inscriptible : rien n\'est fait.');
+          }
+        }
+        out(`\nSystème en service : moitié ${running === FLASH ? 'A' : 'B'}. Système de secours : ${hex(other)} à ${hex(other + length)} (${length / 1024} Ko).`);
+        if (mode === 'spare-try') {
+          if (!fs.existsSync(file)) {
+            if (info.readUInt32LE(0) !== 0xdec0edfe) throw new flash2.Flash2Error('la moitié de secours ne contient pas un système entier, et il n\'y a pas de copie sur le PC : rien n\'est fait.');
+            out('Copie du système de secours vers le PC :');
+            const all = buf(await calc.uploadFlash(other, length, bar('lecture')));
+            const again = buf(await calc.uploadFlash(other, 4096));
+            if (all.length !== length || !all.subarray(0, 4096).equals(again)) throw new flash2.Flash2Error('lecture incohérente : rien n\'est écrit.');
+            fs.writeFileSync(file, all);
+            out(`  écrite : ${file} (${all.length} octets). Gardez ce fichier : c'est lui qui permet de tout remettre.`);
+          } else if (fs.statSync(file).size !== length) {
+            throw new flash2.Flash2Error(`${file} existe mais n'a pas la taille du système de secours : rien n'est fait.`);
+          } else {
+            out(`Copie du système de secours déjà sur le PC : ${file}`);
+          }
+          const marker = Buffer.alloc(SECTOR, 0xff);
+          marker.write('NWGBA essai du secours', 0, 'latin1');
+          for (let i = 64; i < SECTOR; i++) marker[i] = (i * 7 + (i >> 8)) & 255;
+          out('Essai : effacement et écriture du premier secteur du système de secours');
+          try {
+            await calc.downloadFlash(other, marker, bar('effacement'), bar('écriture'));
+          } catch (e) {
+            throw new flash2.Flash2Error('la calculatrice a REFUSÉ l\'écriture dans le système de secours.\n  Détail : ' + (e && e.message ? e.message : e));
+          }
+          const back = buf(await calc.uploadFlash(other, SECTOR));
+          if (!back.equals(marker)) {
+            const wrong = back.reduce((n, x, i) => n + (x !== marker[i] ? 1 : 0), 0);
+            throw new flash2.Flash2Error(`l'écriture n'a pas pris (${wrong} octets différents à la relecture) : la calculatrice protège cette zone.`);
+          }
+          out('  écrit et relu : identique. La calculatrice ACCEPTE l\'écriture dans le système de secours.');
+          out('\nÀ faire maintenant : débranchez, appuyez sur RESET au dos de la calculatrice, et regardez si elle redémarre normalement.');
+        } else {
+          const all = fs.readFileSync(file);
+          if (all.length !== length) throw new flash2.Flash2Error('ce fichier n\'a pas la taille du système de secours : rien n\'est fait.');
+          out('Remise du système de secours :');
+          await calc.downloadFlash(other, all, bar('effacement'), bar('écriture'));
+          const back = buf(await calc.uploadFlash(other, length, bar('relecture')));
+          if (!back.equals(all)) throw new flash2.Flash2Error('la relecture ne redonne pas le fichier : le système de secours n\'est pas remis.');
+          out('  remis et relu : identique. La copie de secours est de nouveau ce qu\'elle était.');
+        }
+        await leave(calc, area);
+      } catch (e) {
+        await leave(calc, area);
+        stop(told(e));
+      }
+      process.exit(0);
+    };
+  } else if (mode === 'diag') {
     /* A map of the whole flash, read only: what each half holds, what the
      * calculator says may be written. Nothing is written, nothing installed. */
     globalThis.__gba2nwBefore = async (calc, firmware, area) => {

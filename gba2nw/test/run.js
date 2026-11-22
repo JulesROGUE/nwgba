@@ -345,6 +345,33 @@ if (flash2.nwlinkDir() && fs.existsSync(path.join(ROOT, 'runtime', 'nwgba.nwa'))
     assert.ok(!fs.existsSync(packFile.replace(/\.pack$/, '.nwsave')), 'another game\'s save under this game\'s name');
     assert.ok(saves.decode(saves.fromFile(fs.readFileSync(path.join(tmp, 'autre-jeu-0badcafe.nwsave')))).equals(image));
   });
+
+  test('essai-secours copies the spare system, writes its first sector only, remettre-secours puts it back', () => {
+    const file = path.join(tmp, 'secours.bin'), report = path.join(tmp, 'r4.json');
+    let r = gba2nw(['essai-secours', file], { running: 'A', report });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ACCEPTE/);
+    let after = JSON.parse(fs.readFileSync(report));
+    assert.ok(after.changes.length > 0 && after.changes.every((c) => c[0] >= FLASH + HALF && c[0] + c[1] <= FLASH + HALF + 0x10000), 'only the first sector of the spare system may change');
+    assert.strictEqual(fs.statSync(file).size, APPS_START);
+    // back, into a calculator in the state the try left it in
+    const flashAfter = report + '.flash';
+    fs.writeFileSync(path.join(tmp, 'marker.bin'), fs.readFileSync(flashAfter).subarray(HALF, HALF + 0x10000));
+    r = gba2nw(['remettre-secours', file], { running: 'A', report: path.join(tmp, 'r5.json'), preload: { address: FLASH + HALF, file: path.join(tmp, 'marker.bin') } });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.ok(fs.readFileSync(path.join(tmp, 'r5.json.flash')).subarray(HALF, HALF + APPS_START).equals(fs.readFileSync(file)));
+    // a calculator that refuses
+    r = gba2nw(['essai-secours', path.join(tmp, 'secours2.bin')], { running: 'A', kernel: 'refuse', report });
+    assert.strictEqual(r.status, 3);
+    assert.match(r.stdout, /REFUSÉ/);
+    after = JSON.parse(fs.readFileSync(report));
+    assert.strictEqual(after.changes.length, 0);
+    // running from B: the spare is A, never B
+    r = gba2nw(['essai-secours', path.join(tmp, 'secours3.bin')], { running: 'B', report });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    after = JSON.parse(fs.readFileSync(report));
+    assert.ok(after.changes.every((c) => c[0] >= FLASH && c[0] + c[1] <= FLASH + 0x10000), 'wrote outside the first sector of half A');
+  });
 } else {
   console.log('skip  saves over USB (npm install, and runtime/nwgba.nwa)');
 }

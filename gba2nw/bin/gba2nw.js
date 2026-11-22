@@ -17,7 +17,7 @@ const flash2 = require('../lib/flash2');
 
 const kb = (n) => `${Math.round(n / 1024)} Ko`;
 /* what the two halves of the calculator's flash can hold next to the app (see lib/flash2.js) */
-const ROOM = 4800 * 1024;
+const ROOM = 4990 * 1024;   /* 2440 KB next to the app, 2560 KB in the other half's app area */
 
 function usage() {
   console.log(`gba2nw : prépare un jeu Game Boy Advance pour la calculatrice NumWorks (appli nwgba).
@@ -127,6 +127,16 @@ function main(argv) {
   if ((cmd === 'installer' || cmd === 'install') && argv[1]) return install(argv[1]);
   if ((cmd === 'preparer' || cmd === 'préparer' || cmd === 'pack') && argv[1]) return prepare(argv.slice(1));
   if (cmd === 'sauver' || cmd === 'save') return saveOrRestore('save', argv.slice(1));
+  if (cmd === 'essai-secours' || cmd === 'remettre-secours') {   /* the spare system's part of the flash (lib/flash2-runner.js) */
+    const nwa = path.join(__dirname, '..', 'runtime', 'nwgba.nwa');
+    const file = argv[1] || 'systeme-de-secours.bin';
+    if (cmd === 'remettre-secours' && !fs.existsSync(file)) {
+      console.log('Erreur : fichier introuvable : ' + file);
+      return 1;
+    }
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), cmd === 'essai-secours' ? 'spare-try' : 'spare-back', file, nwa], { stdio: 'inherit' });
+    return r.status === null ? 1 : r.status;
+  }
   if (cmd === 'diagnostic') {   /* a map of the calculator's flash, read only, into a text file */
     const nwa = path.join(__dirname, '..', 'runtime', 'nwgba.nwa');
     const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), 'diag', argv[1] || 'diagnostic.txt', nwa], { stdio: 'inherit' });
