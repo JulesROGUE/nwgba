@@ -335,6 +335,16 @@ if (flash2.nwlinkDir() && fs.existsSync(path.join(ROOT, 'runtime', 'nwgba.nwa'))
       assert.match(r.stdout, wipesRam ? /elle est remise/ : /toujours en place/);
     }
   });
+
+  test('installer sets the save of another game aside under its own name', () => {
+    const otherStore = path.join(tmp, 'other-end.bin'), report = path.join(tmp, 'r3.json');
+    fs.writeFileSync(otherStore, saves.encode(image, 0x0badcafe));
+    fs.rmSync(packFile.replace(/\.pack$/, '.nwsave'), { force: true });
+    const r = gba2nw(['installer', packFile], { ramEnd: otherStore, report });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.ok(!fs.existsSync(packFile.replace(/\.pack$/, '.nwsave')), 'another game\'s save under this game\'s name');
+    assert.ok(saves.decode(saves.fromFile(fs.readFileSync(path.join(tmp, 'autre-jeu-0badcafe.nwsave')))).equals(image));
+  });
 } else {
   console.log('skip  saves over USB (npm install, and runtime/nwgba.nwa)');
 }

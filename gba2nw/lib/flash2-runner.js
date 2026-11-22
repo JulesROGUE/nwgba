@@ -119,7 +119,14 @@ function main() {
       // first of all, and never in the way: a copy of what the game saved
       try {
         had = await saves.readStore(calc, firmware);
-        if (had && had.store.length > saves.bytesFor(0)) {
+        if (had && had.store.length > saves.bytesFor(0) && had.key !== saves.keyOfPack(parts.main)) {
+          // the save of another game: kept under its own name, and not put back (the new game would not take it)
+          const other = path.join(path.dirname(file), 'autre-jeu-' + had.key.toString(16).padStart(8, '0') + '.nwsave');
+          keep(other, had.store);
+          out(`\nLa calculatrice contient la sauvegarde d'un autre jeu : copiée dans ${other}`);
+          out('  (elle sera perdue dans la calculatrice au lancement du nouveau jeu ; « restaurer » la remettra quand ce jeu-là sera réinstallé)');
+          had = null;
+        } else if (had && had.store.length > saves.bytesFor(0)) {
           keep(saveFile, had.store);
           out(`\nSauvegarde du jeu trouvée dans la calculatrice : copiée dans ${saveFile}`);
         } else {
