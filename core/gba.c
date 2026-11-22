@@ -36,12 +36,23 @@ void gba_init(Gba* g, const GbaHost* host, const Pack* pack, uint8_t* mem, uint3
   g->iwram = mem;
   mem += IWRAM_SIZE;
   memBytes -= IWRAM_SIZE;
+  /* a pack with packed pieces: room to unpack one, and for the state of the LZMA decoder */
+  if(pack->nZip) {
+    const uint32_t piece = pack->pieceGroups * PACK_GROUP, state = pack->method == PACK_LZMA ? LZMA_STATE_BYTES : 0;
+    if(memBytes > piece + state + 64 * GBA_FRAME_COST) {
+      g->zipBuf = mem;
+      g->lzma = (LzmaRun*)(void*)(mem + piece);
+      mem += piece + state;
+      memBytes -= piece + state;
+    }
+  }
   g->nFrames = memBytes / GBA_FRAME_COST;
   if(g->nFrames > EWRAM_PAGES + VRAM_PAGES + 1) g->nFrames = EWRAM_PAGES + VRAM_PAGES + 1;
   g->freeFrames = (uint16_t*)(void*)mem;
   g->frames = mem + ((g->nFrames * 2 + 3) & ~3u);
   mem_reset(g);
   cpu_reset(g);
+  if(pack->nZip && !g->zipBuf) g->outOfMemory = true;   /* no room to unpack a piece of this pack */
   g->render = true;
 }
 

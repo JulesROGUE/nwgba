@@ -11,7 +11,7 @@ uint32_t pack_fnv1a(const uint8_t* data, uint32_t n) {
 
 bool pack_open(Pack* p, const uint8_t* part1, uint32_t avail) {
   memset(p, 0, sizeof *p);
-  if(avail < PACK_HEADER || memcmp(part1, "NWGBAPK2", 8)) return false;
+  if(avail < PACK_HEADER || memcmp(part1, "NWGBAPK3", 8)) return false;
   p->size1 = pack_u32(part1 + 8);
   p->size2 = pack_u32(part1 + 12);
   p->sum2 = pack_u32(part1 + 16);
@@ -30,9 +30,12 @@ bool pack_open(Pack* p, const uint8_t* part1, uint32_t avail) {
   p->zipDir = part1 + pack_u32(part1 + 80);
   const uint32_t zipAt = pack_u32(part1 + 84);
   if(p->size1 > avail || p->split > p->blocks || (p->romSize & (PACK_GROUP - 1)) || zipAt != data + (uint64_t)p->blocks * PACK_BLOCK ||
-     p->zipDir + 3 * (p->nZip + 1) > part1 + data)
+     p->zipDir + PACK_ZIP_ENTRY * (p->nZip + 1) > part1 + data)
     return false;
-  const uint32_t zipSize = pack_u24(p->zipDir + 3 * p->nZip);
+  const uint32_t zipSize = pack_u24(p->zipDir + PACK_ZIP_ENTRY * p->nZip);
+  p->pieceGroups = pack_u32(part1 + 88);
+  p->method = pack_u32(part1 + 92);
+  if(p->pieceGroups < 1 || p->pieceGroups > 64 || p->method > PACK_LZMA) return false;
   /* the cut is between two blocks, or between two streams */
   if((uint64_t)p->size1 + p->size2 != (uint64_t)zipAt + zipSize) return false;
   if(p->split < p->blocks ? p->size1 != data + p->split * PACK_BLOCK : p->size1 < zipAt) return false;
@@ -52,7 +55,7 @@ void pack_second(Pack* p, const uint8_t* data) {
 
 void pack_plain(Pack* p, const uint8_t* rom, uint32_t romSize, uint8_t* table) {
   static uint8_t run[12];
-  static const uint8_t noZip[3] = {0, 0, 0};
+  static const uint8_t noZip[PACK_ZIP_ENTRY] = {0};
   memset(p, 0, sizeof *p);
   const uint32_t pages = romSize / PACK_BLOCK, groups = romSize / PACK_GROUP;
   for(uint32_t i = 0; i < groups; i++) {
@@ -69,6 +72,7 @@ void pack_plain(Pack* p, const uint8_t* rom, uint32_t romSize, uint8_t* table) {
   p->runs = run;
   p->nRuns = 1;
   p->zipDir = noZip;
+  p->pieceGroups = 1;
   p->zip[0] = p->zip[1] = rom;
   p->key = romSize >= 0xb0 ? pack_u32(rom + 0xac) ^ romSize : romSize;
 }

@@ -21,12 +21,12 @@
  * A pack bigger than the room next to the app is cut in two (flash2.js): the
  * cut never goes through a group, a decompressed block or a deflated group.
  *
- *   0  "NWGBAPK2"
+ *   0  "NWGBAPK3"
  *   8  size of the first part       12  size of the second (0: none)
  *  16  checksum of the second part  20  size of the ROM (a multiple of 1024)
  *  24  where the group table is: for each group of the ROM, 16 bits:
  *      below 0x8000: plain, its first block is 4 times that;
- *      0x8000 and up: deflated, entry (that - 0x8000) of the zip table;
+ *      0x8000 and up: packed, in piece (that - 0x8000) of the zip table;
  *      GROUP_ZEROS, GROUP_ONES, GROUP_LEFT_OUT
  *  28  number of runs, 32 where they are: {first page, pages, first block},
  *      the stretches of ROM stored plain in one piece, in order (in pages
@@ -35,16 +35,26 @@
  *      the ROM, size, first block, kind (0 LZ77, 1 run-length)}, in order
  *  44  where block 0 is             48  number of blocks
  *  52  first block of the second part
- *  56  kind of save memory          60  number of deflated groups
+ *  56  kind of save memory          60  number of packed pieces
  *  64  the game's title and code (16 bytes, from the ROM)
- *  80  where the zip table is: 24 bits for each deflated group and one more,
- *      where its stream starts in the zip area (it ends where the next starts)
+ *  80  where the zip table is: 6 bytes for each packed piece and one more:
+ *      where its stream starts in the zip area (24 bits; it ends where the
+ *      next starts), the first group of ROM it holds (16 bits), how many
+ *      groups (8 bits)
  *  84  where the zip area is (it follows the blocks)
+ *  88  the most groups a piece holds (1 to 64)
+ *  92  how the pieces are packed: 0 deflate, 1 LZMA (lc 3, lp 0, pb 2)
+ *
+ * A piece is a stretch of 1 to 64 groups in a row, packed together: the
+ * bigger, the smaller the pack, and the more the app has to unpack to read
+ * one byte (it keeps the pages it read; see romPage in nwgba's mem.c).
  */
 const zlib = require('zlib');
+const lzma = require('../vendor/lzma/lzma-c.js').LZMA;
 const scan = require('./scan');
 
-const MAGIC = 'NWGBAPK2';
+const MAGIC = 'NWGBAPK3';
+const METHOD = { deflate: 0, lzma: 1 };
 const HEADER = 96;
 const BLOCK = 256;
 const GROUP = 1024;
@@ -69,32 +79,58 @@ function saveType(rom) {
 
 /* Is this group program? The app runs code where it is stored, so program
  * has to stay plain. (A mistake is not fatal either way: code found in a
- * deflated group is run from RAM, slowly; data kept plain only takes room.)
- * Program shows by its calls, its function entries and its returns: counted
- * over the 4 KB around. */
-function isProgram(rom, at) {
-  const from = at & ~4095, to = Math.min(from + 4096, rom.length - 2);
-  let marks = 0;
-  for (let i = from; i < to; i += 2) {
-    const a = rom.readUInt16LE(i), b = rom.readUInt16LE(i + 2);
-    if ((a & 0xf800) === 0xf000 && (b & 0xf800) === 0xf800) marks++;
-    if ((a & 0xff00) === 0xb500 || (a & 0xff00) === 0xbd00 || a === 0x4770 || a === 0x4700) marks++;
+ * packed piece is run from RAM, a page at a time, slowly; data kept plain
+ * only takes room.) Program shows by its calls: a call whose target is the
+ * start of a function (a push) is no accident, and a window of 4 KB with
+ * four of them is program. (Counting anything that looks like a call or a
+ * return took 2.4 MB of a 32 MB game for program; this takes 0.8.) */
+function programMap(rom) {
+  const windows = new Uint8Array(Math.ceil(rom.length / 4096));
+  for (let w = 0; w < windows.length; w++) {
+    let good = 0;
+    const to = Math.min((w + 1) * 4096, rom.length - 4);
+    for (let i = w * 4096; i < to && good < 4; i += 2) {
+      const a = rom.readUInt16LE(i), b = rom.readUInt16LE(i + 2);
+      if ((a & 0xf800) !== 0xf000 || (b & 0xf800) !== 0xf800) continue;
+      let off = (a & 0x7ff) << 12 | (b & 0x7ff) << 1;
+      if (off & 0x400000) off -= 0x800000;
+      const t = i + 4 + off;
+      if (t >= 0 && t < rom.length - 2 && (rom.readUInt16LE(t) & 0xfe00) === 0xb400) good++;
+    }
+    windows[w] = good >= 4 ? 1 : 0;
   }
-  return marks >= 40;
+  return windows;
+}
+
+/* a piece of ROM, packed: deflate, or LZMA with a dictionary no bigger than a piece ever is */
+function packPiece(bytes, method) {
+  if (method === 'lzma') return Buffer.from(lzma.compress(bytes, { s: 16, f: 128, m: 1 })).subarray(13);   /* (13 bytes of header: the settings, the size) */
+  return zlib.deflateRawSync(bytes, { level: 9, windowBits: bytes.length > 1024 ? 15 : 10 });
 }
 
 /*
  * romIn: Buffer. options: {limit1: room for the first part (bytes), room:
- * for the whole pack, how: 'ready' | 'zip' (default: ready if it fits in
- * room, else zip), keepSamples, plain (no scan at all, nothing deflated)}
+ * for the whole pack, how: 'ready' | 'zip' (default: the first way that fits
+ * in room), method: 'deflate' | 'lzma' and piece: 1 to 64 groups (for zip),
+ * keepSamples, plain (no scan at all, nothing packed)}
  * returns {part1, part2, report}
  */
 function build(romIn, options = {}) {
   if (!options.how && !options.plain) {
-    const ready = build(romIn, { ...options, how: 'ready' });
-    return ready.report.total <= (options.room || Infinity) ? ready : build(romIn, { ...options, how: 'zip' });
+    /* the first of these that fits the room: each is smaller than the one before, and asks more of the calculator */
+    const room = options.room || Infinity;
+    const ways = [{ how: 'ready' }, { how: 'zip', method: 'deflate', piece: 1 }, { how: 'zip', method: 'lzma', piece: 4 },
+      { how: 'zip', method: 'lzma', piece: 16 }, { how: 'zip', method: 'lzma', piece: 32 }];
+    let r;
+    for (const way of ways) {
+      r = build(romIn, { ...options, ...way });
+      if (r.report.total <= room) break;
+    }
+    return r;
   }
   const how = options.plain ? 'plain' : options.how;
+  const method = how === 'zip' ? (options.method || 'deflate') : 'deflate';
+  const piece = how === 'zip' ? Math.max(1, Math.min(64, options.piece || 1)) : 1;   /* groups in a packed piece, at most */
   const limit1 = options.limit1 || Infinity;
   const romSize = Math.ceil(romIn.length / GROUP) * GROUP;
   const rom = Buffer.concat([romIn, Buffer.alloc(romSize - romIn.length)]);
@@ -112,19 +148,40 @@ function build(romIn, options = {}) {
   for (const b of blocks) { drop(b.offset + 4, b.offset + b.length); streamBytes += b.length; }
   if (process.env.GBA2NW_CLEAN) require('fs').writeFileSync(process.env.GBA2NW_CLEAN, clean);   /* for tests: the ROM as the app must read it back */
 
-  /* what becomes of each group: 'plain', a Buffer (deflated), or one of the GROUP_ values */
+  /* what becomes of each group: 'plain', 'data' (to be packed), or one of the GROUP_ values */
+  const program = how === 'plain' ? null : programMap(rom);
   const fate = new Array(groups);
   for (let g = 0; g < groups; g++) {
     const at = g * GROUP, group = clean.subarray(at, at + GROUP);
     const v = group[0];
     if (unread.subarray(at, at + GROUP).every((x) => x)) fate[g] = GROUP_LEFT_OUT;
     else if ((v === 0xff || v === 0) && group.every((x) => x === v)) fate[g] = v ? GROUP_ONES : GROUP_ZEROS;
-    else if (how === 'plain' || isProgram(rom, at)) fate[g] = 'plain';
+    else if (how === 'plain' || program[at >> 12]) fate[g] = 'plain';
     else if (how === 'ready' && !unread.subarray(at, at + GROUP).some((x) => x)) fate[g] = 'plain';
-    else {
-      const z = zlib.deflateRawSync(group, { level: 9, windowBits: 10 });
-      fate[g] = z.length + 16 < GROUP ? z : 'plain';
+    else fate[g] = 'data';
+  }
+  /* The packed pieces: groups in a row, from a group of data to the last one
+   * of data within reach; groups of zeros in between go in with them (they
+   * cost nothing). A piece that packing does not make smaller stays plain. */
+  const zips = [];          // {group, groups, data}
+  const zipOf = new Int32Array(groups).fill(-1);
+  for (let g = 0; g < groups;) {
+    if (fate[g] !== 'data') { g++; continue; }
+    let end = g + 1, last = g + 1;
+    while (end < groups && end - g < piece && (fate[end] === 'data' || fate[end] === GROUP_ZEROS || fate[end] === GROUP_LEFT_OUT)) {
+      end++;
+      if (fate[end - 1] === 'data') last = end;
     }
+    let held = 0;
+    for (let k = g; k < last; k++) held += fate[k] === 'data' ? 1 : 0;
+    const z = packPiece(clean.subarray(g * GROUP, last * GROUP), method);
+    if (z.length + 16 < held * GROUP) {
+      for (let k = g; k < last; k++) if (fate[k] === 'data') zipOf[k] = zips.length;
+      zips.push({ group: g, groups: last - g, data: z });
+    } else {
+      for (let k = g; k < last; k++) if (fate[k] === 'data') fate[k] = 'plain';
+    }
+    g = last;
   }
 
   /* pieces, in the order they are stored: runs of plain groups, then the decompressed blocks */
@@ -137,9 +194,7 @@ function build(romIn, options = {}) {
     g = end;
   }
   for (const b of blocks) pieces.push({ blob: b, blocks: Math.ceil(b.data.length / BLOCK) });
-  const zips = [];
-  for (let g = 0; g < groups; g++) if (Buffer.isBuffer(fate[g])) zips.push({ group: g, data: fate[g] });
-  if (zips.length >= GROUP_ONES - GROUP_ZIP) throw new Error('too many deflated groups');
+  if (zips.length >= GROUP_ONES - GROUP_ZIP) throw new Error('too many packed pieces');
 
   /* the tables come first; one more run than counted: the cut may make one */
   const runRoom = (pieces.filter((p) => !p.blob).length + 1) * 12;
@@ -147,7 +202,7 @@ function build(romIn, options = {}) {
   const runsAt = (groupTable + groups * 2 + 3) & ~3;
   const blobsAt = runsAt + runRoom;
   const zipDirAt = blobsAt + blocks.length * 16;
-  const data = (zipDirAt + (zips.length + 1) * 3 + 3) & ~3;
+  const data = (zipDirAt + (zips.length + 1) * 6 + 3) & ~3;
   if (data + GROUP > limit1) throw new Error('the first part cannot hold the tables');
 
   /* places; the first part takes whole pieces while they fit, and the start of a run of ROM
@@ -213,10 +268,12 @@ function build(romIn, options = {}) {
     all.writeUInt32LE(p.blob.kind, e + 12);
   });
   zips.forEach((z, i) => {
-    all.writeUInt16LE(GROUP_ZIP + i, groupTable + z.group * 2);
     z.data.copy(all, zipAt + dir[i]);
+    all.writeUInt16LE(z.group, zipDirAt + i * 6 + 3);
+    all.writeUInt8(z.groups, zipDirAt + i * 6 + 5);
   });
-  dir.forEach((o, i) => all.writeUIntLE(o, zipDirAt + i * 3, 3));
+  for (let g = 0; g < groups; g++) if (zipOf[g] >= 0) all.writeUInt16LE(GROUP_ZIP + zipOf[g], groupTable + g * 2);
+  dir.forEach((o, i) => all.writeUIntLE(o, zipDirAt + i * 6, 3));
   const part2 = all.subarray(size1);
   all.write(MAGIC, 0, 'latin1');
   all.writeUInt32LE(size1, 8);
@@ -236,11 +293,13 @@ function build(romIn, options = {}) {
   rom.copy(all, 64, 0xa0, 0xb0);
   all.writeUInt32LE(zipDirAt, 80);
   all.writeUInt32LE(zipAt, 84);
+  all.writeUInt32LE(zips.reduce((m, z) => Math.max(m, z.groups), 1), 88);
+  all.writeUInt32LE(METHOD[method], 92);
   const report = {
     how,
     romSize: romIn.length,
     kept: runs.reduce((n, p) => n + p.pages, 0) * BLOCK,
-    deflated: zips.length * GROUP, deflatedTo: zipSize,
+    deflated: zipOf.reduce((n, z) => n + (z >= 0 ? GROUP : 0), 0), deflatedTo: zipSize, method, piece,
     samples: samples.length, sampleBytes,
     blocks: blocks.length, streamBytes,
     decompressed: blocks.reduce((n, b) => n + b.data.length, 0),
@@ -251,4 +310,4 @@ function build(romIn, options = {}) {
   return { part1: Buffer.from(all.subarray(0, size1)), part2: Buffer.from(part2), report };
 }
 
-module.exports = { build, fnv1a, saveType, MAGIC, HEADER, BLOCK, GROUP, GROUP_LEFT_OUT, GROUP_ZEROS, GROUP_ONES, GROUP_ZIP, SAVE };
+module.exports = { build, fnv1a, saveType, programMap, METHOD, MAGIC, HEADER, BLOCK, GROUP, GROUP_LEFT_OUT, GROUP_ZEROS, GROUP_ONES, GROUP_ZIP, SAVE };

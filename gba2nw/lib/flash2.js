@@ -43,7 +43,7 @@ const HALF = 0x400000;
 const SECTOR = 0x10000;
 const INFO_OFFSET = 0x10000;
 const INFO_SIZE = 48;
-const PACK_MAGIC = 'NWGBAPK2';
+const PACK_MAGIC = 'NWGBAPK3';
 const EXT_MAGIC = 'NWGBAPX1';
 const EXT_HEADER = 32;
 

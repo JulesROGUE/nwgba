@@ -113,17 +113,94 @@ test('the scanner finds the compressed blocks and the samples, and nothing else'
   assert.deepStrictEqual(scan.samples(made.rom, ptrs).map((s) => s.offset), made.sampleAt);
 });
 
+/* raw LZMA (lc 3, lp 0, pb 2) back to n bytes: core/lzma.c, in short */
+function unLzma(inp, n) {
+  let pos = 5, range = 0xffffffff, code = inp.readUInt32BE(1);
+  const P = () => new Uint16Array(0);
+  const mk = (k) => new Uint16Array(k).fill(1024);
+  const isMatch = mk(12 * 4), isRep = mk(12), g0 = mk(12), g1 = mk(12), g2 = mk(12), rep0Long = mk(12 * 4);
+  const posSlot = mk(4 * 64), posSpec = mk(115), align = mk(16), lit = mk(0x300 << 3);
+  const lenC = () => ({ c: mk(2), low: mk(4 * 8), mid: mk(4 * 8), high: mk(256) });
+  const len = lenC(), repLen = lenC();
+  const norm = () => { if (range < 0x1000000) { range = (range << 8) >>> 0; code = ((code << 8) | (inp[pos++] || 0)) >>> 0; } };
+  const bit = (p, i) => {
+    const bound = (range >>> 11) * p[i];
+    let b;
+    if (code < bound) { p[i] += (2048 - p[i]) >> 5; range = bound; b = 0; } else { p[i] -= p[i] >> 5; code = (code - bound) >>> 0; range = (range - bound) >>> 0; b = 1; }
+    norm();
+    return b;
+  };
+  const tree = (p, base, nb) => { let m = 1; for (let i = 0; i < nb; i++) m = (m << 1) + bit(p, base + m); return m - (1 << nb); };
+  const rtree = (p, base, nb) => { let m = 1, s = 0; for (let i = 0; i < nb; i++) { const b = bit(p, base + m); m = (m << 1) + b; s |= b << i; } return s; };
+  const direct = (nb) => { let v = 0; while (nb--) { range >>>= 1; code = (code - range) >>> 0; const t = code >>> 31 ? 0xffffffff : 0; if (t) code = (code + range) >>> 0; norm(); v = ((v << 1) + (t ? 0 : 1)) >>> 0; } return v; };
+  const lenDec = (l, ps) => (!bit(l.c, 0) ? tree(l.low, ps * 8, 3) : !bit(l.c, 1) ? 8 + tree(l.mid, ps * 8, 3) : 16 + tree(l.high, 0, 8));
+  const out = Buffer.alloc(n);
+  let r0 = 0, r1 = 0, r2 = 0, r3 = 0, state = 0, o = 0;
+  while (o < n) {
+    const ps = o & 3;
+    if (!bit(isMatch, state * 4 + ps)) {
+      const base = 0x300 * (o ? out[o - 1] >> 5 : 0);
+      let sym = 1;
+      if (state >= 7) {
+        let match = out[o - r0 - 1];
+        do { const mb = (match >> 7) & 1; match <<= 1; const b = bit(lit, base + ((1 + mb) << 8) + sym); sym = sym << 1 | b; if (mb !== b) break; } while (sym < 0x100);
+      }
+      while (sym < 0x100) sym = sym << 1 | bit(lit, base + sym);
+      out[o++] = sym & 255;
+      state = state < 4 ? 0 : state < 10 ? state - 3 : state - 6;
+      continue;
+    }
+    let l;
+    if (bit(isRep, state)) {
+      if (!bit(g0, state)) {
+        if (!bit(rep0Long, state * 4 + ps)) { state = state < 7 ? 9 : 11; out[o] = out[o - r0 - 1]; o++; continue; }
+      } else {
+        let d;
+        if (!bit(g1, state)) d = r1; else { if (!bit(g2, state)) d = r2; else { d = r3; r3 = r2; } r2 = r1; }
+        r1 = r0; r0 = d;
+      }
+      l = lenDec(repLen, ps);
+      state = state < 7 ? 8 : 11;
+    } else {
+      r3 = r2; r2 = r1; r1 = r0;
+      l = lenDec(len, ps);
+      state = state < 7 ? 7 : 10;
+      const slot = tree(posSlot, (l < 4 ? l : 3) * 64, 6);
+      if (slot < 4) r0 = slot;
+      else {
+        const nb = (slot >> 1) - 1;
+        r0 = ((2 | (slot & 1)) << nb) >>> 0;
+        if (slot < 14) r0 += rtree(posSpec, r0 - slot - 1, nb);
+        else { r0 = (r0 + direct(nb - 4) * 16) >>> 0; r0 += rtree(align, 0, 4); }
+      }
+      if (r0 === 0xffffffff) break;
+    }
+    l += 2;
+    assert.ok(r0 < o, 'LZMA: a distance past the start');
+    for (let i = 0; i < l && o < n; i++, o++) out[o] = out[o - r0 - 1];
+  }
+  return out;
+}
+
 /* reading a pack back, the way core/pack.c does */
 function readPack(all) {
   const u32 = (o) => all.readUInt32LE(o), u24 = (o) => all.readUIntLE(o, 3);
   const table = u32(24), runs = u32(32), blobs = u32(40), data = u32(44), zipDir = u32(80), zipAt = u32(84);
   return {
-    romSize: u32(20), size1: u32(8), size2: u32(12), split: u32(52), save: u32(56), nZip: u32(60), zipAt,
-    zipStarts: Array.from({ length: u32(60) + 1 }, (_, i) => u24(zipDir + 3 * i)),
+    romSize: u32(20), size1: u32(8), size2: u32(12), split: u32(52), save: u32(56), nZip: u32(60), zipAt, piece: u32(88), method: u32(92),
+    zipStarts: Array.from({ length: u32(60) + 1 }, (_, i) => u24(zipDir + 6 * i)),
     group: (g) => {
       const k = all.readUInt16LE(table + g * 2);
       if (k >= PACK.GROUP_ONES) return k;
-      if (k >= PACK.GROUP_ZIP) return zlib.inflateRawSync(all.subarray(zipAt + u24(zipDir + 3 * (k - PACK.GROUP_ZIP)), zipAt + u24(zipDir + 3 * (k - PACK.GROUP_ZIP) + 3)));
+      if (k >= PACK.GROUP_ZIP) {
+        const e = zipDir + 6 * (k - PACK.GROUP_ZIP);
+        const first = all.readUInt16LE(e + 3), n = all[e + 5];
+        assert.ok(g >= first && g < first + n, 'a group outside its piece');
+        const stream = all.subarray(zipAt + u24(e), zipAt + u24(e + 6));
+        const whole = u32(92) === 1 ? unLzma(stream, n * 1024) : zlib.inflateRawSync(stream);
+        assert.strictEqual(whole.length, n * 1024);
+        return whole.subarray((g - first) * 1024, (g - first + 1) * 1024);
+      }
       return all.subarray(data + k * 1024, data + k * 1024 + 1024);
     },
     runs: Array.from({ length: u32(28) }, (_, i) => ({ page: u32(runs + i * 12), pages: u32(runs + i * 12 + 4), block: u32(runs + i * 12 + 8) })),
@@ -190,13 +267,14 @@ test('a "ready" pack holds the ROM minus what was left out, and the blocks decom
   checkCut(p);
 });
 
-test('a "zip" pack holds the whole ROM but the samples, deflated where it is not program', () => {
-  for (const limit1 of [16 * 1024, 6 * 1024, 1 << 30]) {
-    const z = PACK.build(made.rom, { limit1, how: 'zip' });
+test('a "zip" pack holds the whole ROM but the samples, packed where it is not program, in pieces of one or many groups', () => {
+  for (const [limit1, method, piece] of [[16 * 1024, 'deflate', 1], [6 * 1024, 'deflate', 1], [1 << 30, 'deflate', 1], [1 << 30, 'deflate', 16], [1 << 30, 'lzma', 4], [16 * 1024, 'lzma', 32]]) {
+    const z = PACK.build(made.rom, { limit1, how: 'zip', method, piece });
     const p = readPack(Buffer.concat([z.part1, z.part2]));
     assert.strictEqual(p.size1, z.part1.length);
     assert.strictEqual(p.blobs.length, 0);
     assert.ok(p.nZip > 0, 'something should be deflated');
+    assert.ok(p.piece >= 1 && p.piece <= piece && p.method === PACK.METHOD[method]);
     checkGroups(p, false);
     checkCut(p);
     assert.ok(z.report.total < built.report.total, 'smaller than the pack with everything ready');
@@ -206,6 +284,8 @@ test('a "zip" pack holds the whole ROM but the samples, deflated where it is not
 test('the way of packing is chosen by the room there is', () => {
   assert.strictEqual(PACK.build(made.rom, { room: 1 << 30 }).report.how, 'ready');
   assert.strictEqual(PACK.build(made.rom, { room: built.report.total - 1 }).report.how, 'zip');
+  const small = PACK.build(made.rom, { how: 'zip' }).report.total;
+  assert.strictEqual(PACK.build(made.rom, { room: small - 1 }).report.method, 'lzma', 'packed harder when deflate is not enough');
 });
 
 test('a pack in two parts splits as written', () => {

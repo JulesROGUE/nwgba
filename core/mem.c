@@ -768,17 +768,31 @@ static const uint8_t* romPage(Gba* g, uint32_t page) {
     }
   }
   g->romFaults++;
-  /* the group it is in: the one inflated last, or to inflate now */
-  const uint32_t group = page >> 2;
-  if(g->zipGroup != group) {
-    const uint32_t z = pack_group(&g->pack, page) - PACK_ZIP;
-    g->zipGroup = ~0u;
-    if(pack_inflate(pack_zip(&g->pack, z), g->zipBuf, PACK_GROUP) != (int32_t)PACK_GROUP) {
-      gba_logf(g, "pack: group %u does not inflate", (unsigned)group);
-      memset(g->zipBuf, 0, PACK_GROUP);
+  /* The piece it is in: the one unpacked last, or to unpack now, and only as
+   * far as this page (an LZMA stream can be gone on with later; a deflate
+   * stream is done in one go). */
+  uint32_t first, groups;
+  const uint32_t z = pack_group(&g->pack, page) - PACK_ZIP;
+  const uint8_t* const stream = pack_piece(&g->pack, z, &first, &groups);
+  const uint32_t at = (page - first * 4) << PG_SHIFT, size = groups * PACK_GROUP;
+  const uint8_t* bytes = kZeroPage;
+  if(g->zipBuf && at + PG_SIZE <= size && groups <= g->pack.pieceGroups) {
+    if(g->zipPiece != z) {
+      g->zipPiece = ~0u;
+      g->zipHave = 0;
+      if(g->pack.method != PACK_LZMA || lzma_start(g->lzma, stream)) g->zipPiece = z;
+      g->inflates++;
     }
-    g->zipGroup = group;
-    g->inflates++;
+    if(g->zipPiece == z && g->zipHave < at + PG_SIZE) {
+      const int32_t got = g->pack.method == PACK_LZMA ? lzma_more(g->lzma, g->zipBuf, at + PG_SIZE, size) : pack_inflate(stream, g->zipBuf, size);
+      if(got < (int32_t)(at + PG_SIZE)) {
+        gba_logf(g, "pack: piece %u does not unpack", (unsigned)z);
+        g->zipPiece = ~0u;
+      } else {
+        g->zipHave = (uint32_t)got;
+      }
+    }
+    if(g->zipPiece == z) bytes = g->zipBuf + at;
   }
   uint8_t* f;
   if(spare < 0 && old >= 0) {   /* the four places are taken: one page gives its frame */
@@ -786,13 +800,13 @@ static const uint8_t* romPage(Gba* g, uint32_t page) {
     f = g->frames + ((uint32_t)(g->romcFrame[spare] & ~ROMC_LATELY) << PG_SHIFT);
     romLetGo(g, f);
   } else if(spare < 0) {
-    return g->zipBuf + ((page & 3) << PG_SHIFT);   /* (all four hold code that runs: cannot be) */
+    return bytes;   /* (all four hold code that runs: cannot be) */
   } else {
     f = frameGet(g);
-    if(g->outOfMemory) return g->zipBuf + ((page & 3) << PG_SHIFT);
+    if(g->outOfMemory) return bytes;
     /* (taking a frame may have filled or emptied places of the table, but not this one: it was free) */
   }
-  memcpy(f, g->zipBuf + ((page & 3) << PG_SHIFT), PG_SIZE);
+  memcpy(f, bytes, PG_SIZE);
   g->romcPage[spare] = (uint16_t)page;
   g->romcFrame[spare] = (uint16_t)((uint32_t)(f - g->frames) >> PG_SHIFT) | ROMC_LATELY;
   return f;
@@ -1304,7 +1318,8 @@ void mem_reset(Gba* g) {
   memset(g->hard, 0, sizeof g->hard);
   g->packs = g->unpacks = g->wakes = 0;
   memset(g->romcPage, 0xff, sizeof g->romcPage);
-  g->zipGroup = ~0u;
+  g->zipPiece = ~0u;
+  g->zipHave = 0;
   g->inflates = g->romFaults = 0;
   g->romLen = g->rom2Len = 0;
   memset(g->romW, 0, sizeof g->romW);

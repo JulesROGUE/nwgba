@@ -3,7 +3,8 @@
  * describes the layout).
  *
  * The ROM is cut in groups of 1 KB, each stored plain (four blocks of 256
- * bytes, the size of a page of memory), deflated on its own, or not at all
+ * bytes, the size of a page of memory), packed (alone or with the groups
+ * that follow it, with deflate or LZMA: a "piece"), or not at all
  * (zeros, 0xff, or what the calculator can do without: sound samples).
  * A pack may also hold each compressed block of the ROM decompressed, in
  * one piece. A pack too big for the room next to the app is in two parts.
@@ -26,6 +27,10 @@
 #define PACK_ZEROS 0xfffeu      /* all zeros */
 #define PACK_ONES 0xfffdu       /* all 0xff */
 
+#define PACK_DEFLATE 0u
+#define PACK_LZMA 1u
+#define PACK_ZIP_ENTRY 6u
+
 #define PACK_LZ77 0u
 #define PACK_RL 1u
 
@@ -38,8 +43,10 @@ typedef struct Pack {
   uint32_t nRuns;
   const uint8_t* blobs;       /* {address, size, first block, kind}: the decompressed blocks */
   uint32_t nBlobs;
-  const uint8_t* zipDir;      /* 24 bits per deflated group, and one more: where its stream starts */
+  const uint8_t* zipDir;      /* 6 bytes per packed piece, and one more: where its stream starts, its first group, how many groups */
   uint32_t nZip;
+  uint32_t pieceGroups;       /* the most groups a piece holds */
+  uint32_t method;            /* PACK_DEFLATE, PACK_LZMA */
   const uint8_t* zip[2];      /* the stream at o is at zip[o >= zipCut] + o */
   uint32_t zipCut;
   uint32_t saveType;
@@ -59,9 +66,12 @@ static inline uint32_t pack_u32(const uint8_t* p) { return (uint32_t)(p[0] | p[1
 static inline const uint8_t* pack_block(const Pack* p, uint32_t k) { return p->part[k >= p->split] + ((size_t)k << 8); }
 /* what the group table says of the group a page (of 256 bytes) is in */
 static inline uint32_t pack_group(const Pack* p, uint32_t page) { return pack_u16(p->groupTable + 2 * (page >> 2)); }
-/* the stream of deflated group z */
-static inline const uint8_t* pack_zip(const Pack* p, uint32_t z) {
-  const uint32_t o = pack_u24(p->zipDir + 3 * z);
+/* packed piece z: its stream, the first group of ROM it holds and how many */
+static inline const uint8_t* pack_piece(const Pack* p, uint32_t z, uint32_t* group, uint32_t* groups) {
+  const uint8_t* e = p->zipDir + PACK_ZIP_ENTRY * z;
+  const uint32_t o = pack_u24(e);
+  *group = pack_u16(e + 3);
+  *groups = e[5];
   return p->zip[o >= p->zipCut] + o;
 }
 
@@ -72,7 +82,12 @@ const uint8_t* pack_blob(const Pack* p, uint32_t address, uint32_t kind, uint32_
  * number of bytes written, or -1 if the stream is not sound. (It reads up
  * to three bytes past the end of the stream.) */
 int32_t pack_inflate(const uint8_t* in, uint8_t* out, uint32_t n);
-/* the same for a raw LZMA stream (lc = 0, lp = 0, pb = 2); it stops once n bytes are written */
-int32_t pack_unlzma(const uint8_t* in, uint8_t* out, uint32_t n);
+/* Raw LZMA (lc = 3, lp = 0, pb = 2), a stretch at a time: lzma_start, then
+ * lzma_more until enough is out (lzma.c). The state is the caller's:
+ * LZMA_STATE_BYTES, 4-aligned. */
+#define LZMA_STATE_BYTES 17600u
+typedef struct LzmaRun LzmaRun;
+bool lzma_start(LzmaRun* s, const uint8_t* in);
+int32_t lzma_more(LzmaRun* s, uint8_t* out, uint32_t upTo, uint32_t n);
 
 #endif

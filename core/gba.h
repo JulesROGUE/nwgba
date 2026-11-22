@@ -190,10 +190,12 @@ struct Gba {
   /* pages of ROM the pack holds deflated, inflated into frames while they serve */
   uint16_t romcPage[ROM_CACHE];   /* which page of the ROM (0xffff: none) */
   uint16_t romcFrame[ROM_CACHE];  /* its frame; ROMC_LATELY: looked up since the hand last passed */
-  uint32_t zipGroup;              /* the group zipBuf holds (~0: none) */
+  uint32_t zipPiece;              /* the packed piece zipBuf holds (~0: none), */
+  uint32_t zipHave;               /* and how much of it is unpacked so far */
+  uint8_t* zipBuf;                /* the piece unpacked last: the game often goes on to the next page */
+  LzmaRun* lzma;                  /* where an LZMA stream is at (packs made that way) */
   uint32_t inflates, romFaults;   /* since the start */
   uint32_t mixedLines;            /* lines of picture drawn the slower way (layers mixed, windows), since the start */
-  uint8_t zipBuf[PACK_GROUP];     /* the group inflated last: the game often goes on to the next page */
   uint32_t leftOutReads;          /* reads of ROM pages the pack left out */
   Pack pack;
   struct RomWindow {              /* stretches of ROM read as data before the two at hand */

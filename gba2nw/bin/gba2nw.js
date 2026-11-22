@@ -27,6 +27,8 @@ function usage() {
       -o FICHIER.pack      fichier écrit (défaut : le nom du jeu, en .pack)
       --part1-kb N         place pour la première partie (défaut 2440)
       --zip                pack compressé (choisi d'office quand le jeu ne tient pas autrement)
+      --lzma N             pack compressé plus fort, par morceaux de N Ko (1 à 64) : plus petit, plus lent à lire
+      --secours            vise la place qu'il y a en prenant aussi celle du système de secours
       --ready              pack non compressé, blocs du jeu décompressés d'avance
       --keep-samples       garde les échantillons de son dans le pack
       --plain              aucune préparation : la ROM telle quelle
@@ -56,7 +58,9 @@ function prepare(argv) {
     else if (a === '--part1-kb') opts.part1Kb = +argv[++i];
     else if (a === '--keep-samples') opts.keepSamples = true;
     else if (a === '--zip') opts.how = 'zip';
+    else if (a === '--lzma') { opts.how = 'zip'; opts.method = 'lzma'; opts.piece = Math.max(1, Math.min(64, parseInt(argv[++i], 10) || 4)); }
     else if (a === '--ready') opts.how = 'ready';
+    else if (a === '--secours') opts.spare = true;
     else if (a === '--plain') opts.plain = true;
     else { console.log(`Erreur : option inconnue (${a}).`); return 1; }
   }
@@ -72,12 +76,12 @@ function prepare(argv) {
     console.log('Erreur : ce fichier n\'est pas une ROM Game Boy Advance.');
     return 1;
   }
-  const r = pack.build(rom, { limit1: opts.part1Kb * 1024, room: ROOM, how: opts.how, keepSamples: opts.keepSamples, plain: opts.plain });
+  const r = pack.build(rom, { limit1: opts.part1Kb * 1024, room: opts.spare ? ROOM_SPARE : ROOM, how: opts.how, method: opts.method, piece: opts.piece, keepSamples: opts.keepSamples, plain: opts.plain });
   fs.writeFileSync(out, Buffer.concat([r.part1, r.part2]));
   const p = r.report;
   console.log(`${p.title} (${p.code}), ROM de ${kb(p.romSize)}, sauvegarde : ${{ none: 'aucune', sram: 'SRAM', flash: 'flash 64 Ko', eeprom: 'EEPROM', flash1m: 'flash 128 Ko' }[p.save]}`);
   console.log(`  de la ROM, ${kb(p.kept)} gardés tels quels` +
-    (p.deflated ? `, ${kb(p.deflated)} compressés en ${kb(p.deflatedTo)}` : '') +
+    (p.deflated ? `, ${kb(p.deflated)} compressés en ${kb(p.deflatedTo)}${p.method === 'lzma' ? ` (LZMA, morceaux de ${p.piece} Ko)` : ''}` : '') +
     (p.sampleBytes ? ` ; son retiré : ${p.samples} échantillons, ${kb(p.sampleBytes)}` : '') +
     (p.streamBytes ? ` ; blocs compressés retirés : ${kb(p.streamBytes)}` : ''));
   if (p.blocks) console.log(`  ${p.blocks} blocs décompressés d'avance : ${kb(p.decompressed)}`);

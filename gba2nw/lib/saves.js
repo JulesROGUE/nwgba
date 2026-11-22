@@ -201,7 +201,7 @@ function encode(image, key) {
 
 /* the key the app gives a game: from its pack (core/pack.c) */
 function keyOfPack(pack) {
-  if (pack.length < 96 || pack.subarray(0, 8).toString('latin1') !== 'NWGBAPK2') throw new SaveError('ce fichier n\'est pas un pack nwgba.');
+  if (pack.length < 96 || pack.subarray(0, 8).toString('latin1') !== 'NWGBAPK3') throw new SaveError('ce fichier n\'est pas un pack nwgba.');
   return (pack.readUInt32LE(64 + 12) ^ pack.readUInt32LE(20)) >>> 0;
 }
 
