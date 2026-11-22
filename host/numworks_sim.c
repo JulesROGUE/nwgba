@@ -113,7 +113,7 @@ eadk_keyboard_state_t eadk_keyboard_scan(void) {
     started = true;
     shot();
   }
-  if(scans && scans % 300 == 0) shot();
+  if(scans && scans % (getenv("NW_SIM_EVERY") ? atoi(getenv("NW_SIM_EVERY")) : 300) == 0 && scans >= (getenv("NW_SIM_FROM") ? atoi(getenv("NW_SIM_FROM")) : 0)) shot();
   if(scans >= maxFrames) {
     shot();
     printf("sim: %d frames, clock %llu ms, %llu pixels sent a frame\n", scans, (unsigned long long)clockMs, pixelsSent / (unsigned)scans);
@@ -135,7 +135,7 @@ eadk_keyboard_state_t eadk_keyboard_scan(void) {
   if(pad & GBA_L) k |= (eadk_keyboard_state_t)1 << eadk_key_exp;
   if(pad & GBA_R) k |= (eadk_keyboard_state_t)1 << eadk_key_power;
   if(scans == 400) k |= (eadk_keyboard_state_t)1 << eadk_key_zero;   /* the figures at the bottom, once */
-  if(scans == 5000) k |= (eadk_keyboard_state_t)1 << eadk_key_one;   /* and the picture as it is, from there on */
+  if(scans == 5000 && !getenv("NW_SIM_WIDE")) k |= (eadk_keyboard_state_t)1 << eadk_key_one;   /* and the picture as it is, from there on */
   return k;
 }
 

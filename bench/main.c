@@ -83,7 +83,13 @@ static uint8_t plainTable[0x10000];   /* for a ROM as it is, up to 8 MB */
 static uint16_t sink[GBA_W];
 static uint32_t checksum;
 
+#ifdef BENCH_SHOT   /* the picture of the last frame goes to a file on the PC (raw, 240 x 160 x 16 bits) */
+static uint16_t shotPx[GBA_W * GBA_H];
+#endif
 static void line(void* user, int y, const uint16_t* px) {
+#ifdef BENCH_SHOT
+  memcpy(shotPx + y * GBA_W, px, GBA_W * 2);
+#endif
   (void)user;
   memcpy(sink, px, sizeof sink);   /* stands for handing the line to the display */
   checksum = checksum * 31 + px[(y * 7) % GBA_W];
@@ -182,6 +188,15 @@ int main(void) {
   run(1, "drawing every frame");
   run(0, "drawing nothing");
   run(3, "drawing one frame in 3");
+#endif
+#ifdef BENCH_SHOT
+  {
+    uint32_t a[3] = {(uint32_t)"build/bench_shot.raw", 5, 20};
+    uint32_t f = semi(0x01, a);
+    uint32_t b[3] = {f, (uint32_t)shotPx, sizeof shotPx};
+    semi(0x05, b);
+    semi(0x02, &f);
+  }
 #endif
   out("checksum ");
   outNum(checksum);
