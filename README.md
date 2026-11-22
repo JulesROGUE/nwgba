@@ -45,6 +45,8 @@ Les images sont les mêmes, au pixel près, qu'avec toute la mémoire voulue. Ce
 - *pack prêt* : les blocs compressés du jeu sont rangés déjà décompressés (c'est ce qui épargne la vraie mémoire, voir plus haut), et leurs versions compressées sont retirées. Plus gros que la ROM : 4,4 Mo pour les 4 Mo d'Advance Wars ;
 - *pack compressé* : la ROM est coupée en groupes de 1 Ko ; ce qui est du programme reste tel quel (il s'exécute sur place), tout le reste est compressé groupe par groupe (deflate, celui de zlib), et décompressé dans un cadre de mémoire quand le jeu le lit (`core/inflate.c`, et « romPage » dans `core/mem.c`). Ces cadres se reprennent sans rien coûter : le pack a toujours l'original. Les 16 Mo de Pokémon Rubis (8,5 Mo sans le remplissage) donnent un pack de 4,1 Mo.
 
+Un pack de plus de 5 Mo peut encore s'installer, jusqu'à 6,4 Mo, avec `gba2nw installer JEU.pack --secours` : la seconde partie déborde alors de la zone des applis de l'autre moitié de la flash sur le système de secours qui s'y trouve (1,4 Mo, son premier secteur excepté). La calculatrice démarre toujours, sur le système en service ; `gba2nw` copie d'abord le système de secours sur le PC, et `remettre-secours` le rétablit. Essayé sur une N0110 en 25.2.0 : l'écriture y est acceptée, une appli peut y lire, et la calculatrice redémarre avec le début du système de secours effacé.
+
 Dans les deux cas les échantillons de son ne sont pas gardés (personne ne les jouera) : 2 Mo dans Rubis, cris compris.
 
 ### Les sauvegardes

@@ -259,7 +259,7 @@ function main() {
       process.exit(0);
     };
   } else {
-    const hook = parts.ext ? flash2.makeHook({ ext: parts.ext }) : null;
+    const hook = parts.ext ? flash2.makeHook({ ext: parts.ext, spare: extra === '--secours', spareFile: path.join(path.dirname(file), 'systeme-de-secours.bin') }) : null;
     const saveFile = file.replace(/\.pack$/i, '') + '.nwsave';
     let had = null;
     globalThis.__gba2nwBefore = async (calc, firmware, area) => {

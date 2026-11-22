@@ -38,6 +38,16 @@ uint32_t flash_extensionAddress(uint32_t address, const uint8_t* thisInfo, const
   if(end > other + FLASH_HALF - FLASH_SECTOR) end = other + FLASH_HALF - FLASH_SECTOR;
   start = (start + FLASH_SECTOR - 1) & ~(FLASH_SECTOR - 1);
   const uint32_t need = (extSize + FLASH_SECTOR - 1) & ~(FLASH_SECTOR - 1);
-  if(need < extSize || start >= end || need > end - start) return 0;
+  if(need < extSize) return 0;
+  if(start < end && need <= end - start) return end - need;
+  /* Too big for the app area: it goes on downwards into the spare system
+   * itself (which is then no system any more), down to the second sector
+   * of the half. What the other half says of itself is then written over:
+   * the end is the one this half declares, moved to the other half. */
+  if(!appArea(half, thisInfo, &start, &end)) return 0;
+  end = end - half + other;
+  if(end > other + FLASH_HALF - FLASH_SECTOR) end = other + FLASH_HALF - FLASH_SECTOR;
+  start = other + FLASH_SECTOR;
+  if(start >= end || need > end - start) return 0;
   return end - need;
 }

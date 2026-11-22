@@ -8,7 +8,10 @@
  * (the same magic number first and last, the bounds of its area for apps at
  * offsets 20 and 24). The second part goes at the very end of the app area
  * of the half that is NOT running, the last sector of the half excluded (the
- * system keeps settings there). The PC tool that writes it and the app that
+ * system keeps settings there). A second part too big for that goes on
+ * downwards into the spare system itself, its first sector excluded: the
+ * calculator then has no spare system any more (it starts all the same;
+ * gba2nw keeps a copy of it on the PC and can write it back). The PC tool that writes it and the app that
  * reads it both go through flash_extensionAddress(), so they cannot disagree.
  *
  * The second part starts with a header of FLASH_EXT_HEADER bytes: "NWGBAPX1",

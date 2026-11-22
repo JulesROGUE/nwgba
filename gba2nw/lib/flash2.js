@@ -99,8 +99,23 @@ function extAddress(address, thisInfo, otherInfo, extSize) {
   if (end > other + HALF - SECTOR) end = other + HALF - SECTOR;
   start = Math.ceil(start / SECTOR) * SECTOR;
   const need = Math.ceil(extSize / SECTOR) * SECTOR;
+  if (start < end && need <= end - start) return end - need;
+  // too big for the app area: on downwards into the spare system, its first sector excluded (core/flash.c)
+  const own = appArea(half, thisInfo);
+  if (!own) return 0;
+  end = own.end - half + other;
+  if (end > other + HALF - SECTOR) end = other + HALF - SECTOR;
+  start = other + SECTOR;
   if (start >= end || need > end - start) return 0;
   return end - need;
+}
+/* does an extension of that size leave the app area of the other half, into its system? */
+function spills(address, thisInfo, otherInfo, extSize) {
+  const half = FLASH + Math.floor((address - FLASH) / HALF) * HALF;
+  const other = half === FLASH ? FLASH + HALF : FLASH;
+  const at = extAddress(address, thisInfo, otherInfo, extSize);
+  const own = appArea(half, thisInfo);
+  return !!at && !!own && at < own.start - half + other;
 }
 
 function fnv1a(buf) {
@@ -144,9 +159,9 @@ function plan(extLength, area, thisInfo, otherInfo, layout) {
   }
   const length = Math.ceil(extLength / SECTOR) * SECTOR;
   // belt and braces: whatever the function above says, never outside the
-  // other half, never its first sectors (its system starts there), never its
-  // last one (the system's settings), never the running half
-  const lowest = other + INFO_OFFSET + SECTOR;
+  // other half, never its first sector, never its last one (the system's
+  // settings), never the running half
+  const lowest = other + SECTOR;
   const highest = other + HALF - SECTOR;
   if (address % SECTOR !== 0 || address < lowest || address + length > highest || (address < end && address + length > start)) {
     throw new Flash2Error(`adresse calculée hors de la zone permise (${hex(address)}) : rien n'est écrit.`);
@@ -186,7 +201,7 @@ function progress(label, out) {
  * It writes the extension where the app will look for it, unless it is
  * there already, and reads it back. Throws a Flash2Error when it cannot.
  */
-function makeHook({ ext, out = process.stdout }) {
+function makeHook({ ext, out = process.stdout, spare = false, spareFile = null }) {
   const log = (s) => out.write(s + '\n');
   return async function before(calc, firmware, area) {
     const model = calc.infos && calc.infos.model;
@@ -198,13 +213,34 @@ function makeHook({ ext, out = process.stdout }) {
     const half = FLASH + Math.floor((start - FLASH) / HALF) * HALF;
     const other = half === FLASH ? FLASH + HALF : FLASH;
     log(`\nSeconde partie du jeu (${kb(ext.length)}) : autre moitié de la mémoire flash`);
+    const same = (a, b) => Buffer.compare(Buffer.from(a.buffer, a.byteOffset, a.length), Buffer.from(b.buffer, b.byteOffset, b.length)) === 0;
     const thisInfo = await calc.uploadFlash(half + INFO_OFFSET, INFO_SIZE);
     const otherInfo = await calc.uploadFlash(other + INFO_OFFSET, INFO_SIZE);
     const where = plan(ext.length, { start, end }, thisInfo, otherInfo, calc.infos.memoryLayout || []);
+    if (spills(start, thisInfo, otherInfo, ext.length)) {
+      // the game needs the room of the spare system
+      if (!spare) {
+        throw new Flash2Error(`ce jeu ne tient pas dans les deux zones d'applis : il lui faut aussi la place du système de secours (${kb(start - half)}).\n` +
+          '  La calculatrice n\'aurait plus de copie de secours de son système (elle démarre quand même ; « remettre-secours » la rétablit).\n' +
+          '  Pour l\'accepter, relancez avec --secours.');
+      }
+      const sys = start - half;   // the spare system: as long as ours
+      const looksWhole = Buffer.from(otherInfo.buffer, otherInfo.byteOffset, otherInfo.length).readUInt32LE(0) === 0xdec0edfe;
+      if (looksWhole && spareFile && !fs.existsSync(spareFile)) {
+        log('  le système de secours est d\'abord copié sur le PC :');
+        const all = await calc.uploadFlash(other, sys, progress('lecture   ', out));
+        fs.writeFileSync(spareFile, Buffer.from(all.buffer, all.byteOffset, all.length));
+        log(`  ${spareFile} (à garder : « remettre-secours » s'en sert)`);
+      }
+      // its first sector: neither a system's nor the game's. Erased, with a word of ours, so that nothing takes the half for a system
+      const first = Buffer.alloc(SECTOR, 0xff);
+      first.write('NWGBA : ici, un jeu', 0, 'latin1');
+      const now = await calc.uploadFlash(other, SECTOR);
+      if (!same(now, first)) await calc.downloadFlash(other, first, progress('effacement du début du système de secours', out), () => {});
+    }
     log(`  système en service dans la moitié ${half === FLASH ? 'A' : 'B'}, écriture dans la moitié ${other === FLASH ? 'A' : 'B'} : ` +
       `${hex(where.address)} à ${hex(where.address + where.length)} (${where.sectors} secteurs de 64 Ko)`);
 
-    const same = (a, b) => Buffer.compare(Buffer.from(a.buffer, a.byteOffset, a.length), Buffer.from(b.buffer, b.byteOffset, b.length)) === 0;
     // already there? (reinstalling finds it in place)
     const head = await calc.uploadFlash(where.address, EXT_HEADER);
     if (same(head, ext.subarray(0, EXT_HEADER))) {
@@ -294,4 +330,4 @@ function loadNwlink(dir, { usb } = {}) {
   return m.exports;
 }
 
-module.exports = { splitPack, extAddress, plan, makeHook, loadNwlink, nwlinkDir, Flash2Error, FLASH, HALF, SECTOR, INFO_OFFSET, INFO_SIZE, EXT_HEADER };
+module.exports = { splitPack, extAddress, spills, plan, makeHook, loadNwlink, nwlinkDir, Flash2Error, FLASH, HALF, SECTOR, INFO_OFFSET, INFO_SIZE, EXT_HEADER };

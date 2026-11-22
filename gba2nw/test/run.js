@@ -372,6 +372,39 @@ if (flash2.nwlinkDir() && fs.existsSync(path.join(ROOT, 'runtime', 'nwgba.nwa'))
     after = JSON.parse(fs.readFileSync(report));
     assert.strictEqual(after.changes.length, 0);
   });
+
+  test('a game too big for the two app areas takes the room of the spare system, only when told to', () => {
+    // 3.5 MB that do not compress: a second part bigger than an app area
+    const big = Buffer.alloc(3500 * 1024);
+    let seed = 5;
+    for (let i = 0; i < big.length; i++) { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; big[i] = seed >>> 24; }
+    made.rom.copy(big, 0, 0, 0xc0);
+    const b = PACK.build(big, { limit1: 64 * 1024, plain: true });
+    const bigPack = path.join(tmp, 'gros.pack'), report = path.join(tmp, 'r6.json'), spare = path.join(tmp, 'systeme-de-secours.bin');
+    fs.writeFileSync(bigPack, Buffer.concat([b.part1, b.part2]));
+    const ext = flash2.splitPack(fs.readFileSync(bigPack)).ext;
+    assert.ok(ext.length > APPS_END - APPS_START);
+    assert.ok(flash2.spills(A.start, info48(A.start, A.end), info48(B.start, B.end), ext.length));
+    assert.ok(!flash2.spills(A.start, info48(A.start, A.end), info48(B.start, B.end), 2000 * 1024));
+
+    let r = gba2nw(['installer', bigPack], { running: 'A', report });
+    assert.strictEqual(r.status, 3);
+    assert.match(r.stdout, /--secours/);
+    assert.strictEqual(JSON.parse(fs.readFileSync(report)).changes.length, 0, 'refused, yet something was written');
+
+    r = gba2nw(['installer', bigPack, '--secours'], { running: 'A', report });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    const flash = fs.readFileSync(report + '.flash');
+    const at = flash2.extAddress(A.start, info48(A.start, A.end), info48(B.start, B.end), ext.length);
+    assert.ok(at >= FLASH + HALF + 0x10000 && at < B.start, 'not in the spare system');
+    assert.ok(flash.subarray(at - FLASH, at - FLASH + ext.length).equals(ext));
+    assert.strictEqual(flash.subarray(HALF, HALF + 19).toString('latin1'), 'NWGBA : ici, un jeu');
+    assert.strictEqual(fs.statSync(spare).size, APPS_START, 'no copy of the spare system on the PC');
+    const after = JSON.parse(fs.readFileSync(report));
+    assert.ok(after.changes.every((c) => c[0] >= A.start && c[0] + c[1] <= A.end || c[0] >= FLASH + HALF && c[0] + c[1] <= B.end), 'the running system or the settings were touched');
+    // where the app looks once the other half no longer describes itself: the same place
+    assert.strictEqual(flash2.extAddress(A.start, info48(A.start, A.end), Buffer.alloc(48, 0x77), ext.length), at);
+  });
 } else {
   console.log('skip  saves over USB (npm install, and runtime/nwgba.nwa)');
 }

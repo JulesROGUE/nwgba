@@ -18,6 +18,7 @@ const flash2 = require('../lib/flash2');
 const kb = (n) => `${Math.round(n / 1024)} Ko`;
 /* what the two halves of the calculator's flash can hold next to the app (see lib/flash2.js) */
 const ROOM = 4990 * 1024;   /* 2440 KB next to the app, 2560 KB in the other half's app area */
+const ROOM_SPARE = 6400 * 1024;   /* and with the room of the spare system (installer --secours) */
 
 function usage() {
   console.log(`gba2nw : prépare un jeu Game Boy Advance pour la calculatrice NumWorks (appli nwgba).
@@ -37,6 +38,10 @@ function usage() {
   gba2nw restaurer FICHIER.nwsave       remet une sauvegarde dans la calculatrice
   gba2nw restaurer FICHIER.sav JEU.pack     la même chose, depuis la sauvegarde d'un autre émulateur
   (« installer » copie d'abord la sauvegarde à côté du pack, et la remet si l'installation l'a effacée.)
+
+  gba2nw installer JEU.pack --secours   pour un jeu trop gros : prend aussi la place du système de secours
+                                        (copié d'abord dans systeme-de-secours.bin ; la calculatrice démarre toujours)
+  gba2nw remettre-secours FICHIER.bin   rétablit le système de secours
 
   gba2nw diagnostic [FICHIER.txt]       lit la mémoire flash de la calculatrice et en fait un rapport (n'écrit rien)
 `);
@@ -79,11 +84,12 @@ function prepare(argv) {
   if (p.how === 'zip') console.log('  (pack compressé : le jeu ne tenait pas autrement ; il demandera un peu plus de mémoire vive et de calcul)');
   console.log(`Pack écrit : ${out} (${kb(p.total)}` + (p.size2 ? `, en deux parties : ${kb(p.size1)} + ${kb(p.size2)})` : ')'));
   if (p.save === 'eeprom') console.log('Attention : ce jeu sauvegarde sur une mémoire EEPROM, que nwgba ne connaît pas encore : il ne pourra pas sauvegarder.');
-  if (p.total > ROOM) console.log(`Attention : ${kb(p.total)}, c'est plus que ce que la calculatrice peut recevoir (environ ${kb(ROOM)}) : l'installation échouera.`);
+  if (p.total > ROOM_SPARE) console.log(`Attention : ${kb(p.total)}, c'est plus que ce que la calculatrice peut recevoir (${kb(ROOM)}, ou ${kb(ROOM_SPARE)} en prenant la place de son système de secours) : l'installation échouera.`);
+  else if (p.total > ROOM) console.log(`Ce pack dépasse les ${kb(ROOM)} des deux zones d'applis : il s'installe avec « installer ${out} --secours », qui prend la place du système de secours de la calculatrice.`);
   return 0;
 }
 
-function install(packFile) {
+function install(packFile, spare) {
   const nwa = path.join(__dirname, '..', 'runtime', 'nwgba.nwa');
   if (!fs.existsSync(nwa)) {
     console.log('Erreur : runtime/nwgba.nwa manque (construisez l\'appli avec « make nwa » dans nwgba).');
@@ -98,7 +104,7 @@ function install(packFile) {
   }
   console.log(`Installation de ${packFile} : ${kb(parts.main.length)} avec l'appli` +
     (parts.ext ? `, ${kb(parts.ext.length)} dans l'autre moitié de la mémoire flash` : ''));
-  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), 'install', packFile, nwa], { stdio: 'inherit' });
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'flash2-runner.js'), 'install', packFile, nwa, ...(spare ? ['--secours'] : [])], { stdio: 'inherit' });
   return r.status === null ? 1 : r.status;
 }
 
@@ -124,7 +130,10 @@ function saveOrRestore(mode, args) {
 
 function main(argv) {
   const cmd = argv[0];
-  if ((cmd === 'installer' || cmd === 'install') && argv[1]) return install(argv[1]);
+  if ((cmd === 'installer' || cmd === 'install') && argv[1]) {
+    const rest = argv.slice(1).filter((a) => a !== '--secours');
+    return install(rest[0], rest.length < argv.length - 1);
+  }
   if ((cmd === 'preparer' || cmd === 'préparer' || cmd === 'pack') && argv[1]) return prepare(argv.slice(1));
   if (cmd === 'sauver' || cmd === 'save') return saveOrRestore('save', argv.slice(1));
   if (cmd === 'essai-secours' || cmd === 'remettre-secours') {   /* the spare system's part of the flash (lib/flash2-runner.js) */
