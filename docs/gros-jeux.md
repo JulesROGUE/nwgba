@@ -36,9 +36,16 @@ décompressions par image, en permanence). Garder des *pages* de 256 octets (96 
 groupe décompressé change tout : 100 à 150 décompressions pour 2 000 images quelle que soit la
 taille du groupe, 97 % des images sans aucune, 25 à 35 dans la pire image (un changement de scène).
 
+## Le temps d'une décompression
+
+Sur le processeur simulé, quinze groupes de 32 Ko pris dans le jeu : 2,26 millions d'instructions en
+moyenne pour LZMA (`core/lzma.c`, vérifié contre xz), 0,76 pour deflate. Avec la règle calée sur la
+calculatrice (6,5 ns par instruction), 15 ms par groupe LZMA entier, la moitié en moyenne si on
+s'arrête à la page voulue : un changement de scène à trente décompressions gèlerait un quart à une
+demi-seconde, et le reste du temps rien.
+
 ## Ce qu'il reste à savoir
 
-- le temps d'une décompression LZMA de 32 Ko sur le processeur (le banc) ;
 - la mémoire : le jeu demande 120 Ko de vraie mémoire dans l'introduction ; avec un groupe de 32 Ko,
   48 à 96 Ko de pages et l'état du décompresseur, il faut plus que les 94 Ko d'une appli ordinaire ;
 - le jeu au-delà de l'introduction (combats) ;

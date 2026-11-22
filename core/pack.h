@@ -72,5 +72,7 @@ const uint8_t* pack_blob(const Pack* p, uint32_t address, uint32_t kind, uint32_
  * number of bytes written, or -1 if the stream is not sound. (It reads up
  * to three bytes past the end of the stream.) */
 int32_t pack_inflate(const uint8_t* in, uint8_t* out, uint32_t n);
+/* the same for a raw LZMA stream (lc = 0, lp = 0, pb = 2); it stops once n bytes are written */
+int32_t pack_unlzma(const uint8_t* in, uint8_t* out, uint32_t n);
 
 #endif
